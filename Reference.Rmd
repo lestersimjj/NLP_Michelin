@@ -1,0 +1,1818 @@
+---
+title: "DBA4761 Project 2"
+author: "Tan Qing Lin"
+date: "October 22, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Article 1: Comparing strengths and weaknesses of NLP techniques
+
+## Before we start: Preparation of review texts for NLP
+
+In a sequence of articles we compare different NLP techniques to show you how we get valuable information from unstructured text. About a year ago we gathered reviews on Dutch restaurants. We were wondering whether 'the wisdom of the croud' - reviews from restaurant visitors - could be used to predict which restaurants are most likely to receive a new Michelin-star. Read this post to see how that worked out. We used topic modeling as our primary tool to extract information from the review texts and combined that with predictive modeling techniques to end up with our predictions.
+
+We got a lot of attention with our predictions and also questions about how we did the text analysis part. To answer these questions, we will explain our approach in more detail in the coming articles. But we didn't stop exploring NLP techniques after our publication, and we also like to share insights from adding more novel NLP techniques. More specifically we will use two types of word embeddings - a classic Word2Vec model and a GLoVe embedding model - we'll use transfer learning with pretrained word embeddings and we use BERT. We compare the added value of these advanced NLP techniques to our baseline topic model on the same dataset. By showing what we did and how we did it, we hope to guide others that are keen to use textual data for their own data science endeavours.
+
+Before we delve into the analytical side of things, we need some prepared textual data. As all true data scientists know, proper data preparation takes most of your time and is most decisive for the quality of the analysis results you end up with. Since preparing textual data is another cup of tea compared to preparing structured numeric or categorical data, and our goal is to show you how to do text analytics, we also want to show you how we cleaned and prepared the data we gathered. Therefore, in this notebook we start with the data dump with all reviews and explore and prepare this data in a number of steps:
+
+As a result of these steps, we end up with - aside from building insights in our data and some cleaning - a number of flat files we can use as source files throughout the rest of the articles:
+
+
+reviews.csv: a csv file with review texts (original and cleaned) - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review)
+labels.csv: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+restoid.csv: a csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+trainids.csv: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)
+features.csv: a csv file with other features regarding the reviews (included key: restoreviewid)
+These files with the cleaned and relevant data for NLP techniques are made available to you via public blob storage so that you can run all code we present yourself and see how things work in more detail.
+
+## Step 0: Setting up our context
+First, we set up our workbook environment with the required packages to prepare and explore our data. The source data is not made available, but the resulting files are!
+
+In preparing and exploring the data we need two packages: tidyverse and tidytext. As you probably know, tidyverse is the data wrangling and visualisation toolkit created by the R legend Hadley Wickham. Tidytext is a 'tidy' R package focused on using text. It's created by Julia Silge and David Robertson and is accompanied with their nice book Text Mining in R.
+
+```{r}
+# Loading packages 
+library(tidyverse)
+library(tidytext)
+
+#set size of plot
+options(repr.plot.height = 400, repr.plot.width = 1000, repr.plot.res = 100)
+```
+
+## Step 1: Exploring and preparing our review data
+Now, let's have a look at the data. Our raw review data consists of 379.718 reviews with in total 28 columns, containing details on the restaurant (name, location, average scores, number of reviews), the reviewer (id, user name, fame, number of reviews) and of course the review (id, scores and - tada- the review text). Here's an overview:
+
+```{r}
+# get rawdata
+rawdata <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/RestoReviewRawdata.csv',header=TRUE,stringsAsFactors = FALSE,row.names = NULL)
+str(rawdata)
+```
+
+For now, we're primarily interested in the review text. Aside from those, we only need to keep some id's to match our reviews to restaurants and to michelin restaurants later on. To get an impression of what we'll be working with, let's look at some review texts:
+
+```{r}
+# look at some example texts
+rawdata %>% select(reviewText) %>% sample_n(5,seed=1234) %>% pull()
+```
+
+Ok, there's clearly some cleaning to be done here.
+
+First of all, the available texts are all encapsulated in "b'...''", indicating the texts are byte literals. Also you might spot some strange sequences of tokens like in 'ingredi\xc3\xabnten', indicating that our texts include UTF-8 encoded tokens (here, the character ë that has the code \xc3\xab in UTF-8). This combination of byte literal encapsulation with the UTF-8 codes shows that in the creation of the source data we have available, the encoding got messed up a bit, making it difficult to to obtain the review texts out of the encoded data. We won't go in to too much detail here (if you want, read this) but you might run into similar stuff when you start working with textual data. In short, there are different encoding types and you need to know what you are working with. We need to make sure we use the right encoding and we should get rid of the "b'...''" in the strings.
+
+We could spend some time on figuring out how to correct this messing-up due to coding as good as possible. However, in order not to lose too much time and effort on undoing this (and we don't) we can take a short cut with minimal loss of data by cleaning the texts with some regular expressions (with the gsub() function in the code below). Depending on your goal, you might want to go the extra mile and try to restore the texts in their original UTF-8 encoding though! As so often in data science projects, we're struggling with available time and resources: You need to pick you battles - and pick them wisely!
+
+Do we have other things to cover? To get a better understanding of our data, let's check the most frequent, identical review texts:
+
+```{r}
+rawdata %>% 
+    group_by(reviewText) %>% 
+    summarize(n_reviews=n()) %>% 
+    mutate(pct=n_reviews/sum(n_reviews)) %>%
+    arrange(-n_reviews) %>% 
+    top_n(10,n_reviews) 
+```
+
+Ok, several things to solve here:
+
+About 3% of all reviews have no review text so they are not useful and we can delete those.
+Another 0,4% has the value "b'- Recensie is momenteel in behandeling -'" (In English: The review is currently being processed) and therefore the actual review text is not published yet. Similar to empty reviews, we can delete these reviews.
+We see several frequent review texts that only differ in punctuation. Here we make our next decision with possibly high impact on later analysis steps: We remove punctuation entirely from our data. Since we want to focus on total review texts in our analyses and not on the sentences within reviews, this is ok for us. For other analyses, this might not be the case!
+Several reviews seem very short and are not that helpful in trying to learn from the review text. Although this is very context dependent (when performing sentiment analysis, short reviews like 'Top!' (English: Top!), 'Prima' (Engish: Fine/OK) and 'Heerlijk gegeten' (En: Had a nice meal) might still have much value!) we have to set a minimum length to reviews.
+
+```{r}
+data <- rawdata %>% 
+  #remove metatext ('b:'), replace linebreaks and some punctuation with space and remove other punctuation and set to lower case.
+  mutate(reviewTextClean=gsub('[[:punct:]]+', '',gsub('\\\\n|\\.|\\,|\\;',' ',tolower(substr(reviewText,3,nchar(reviewText)-1))))) %>%
+  # create indicator validReview that is 0 for reviews to delete 
+  mutate(validReview=case_when(grepl('recensie is momenteel in behandeling',reviewTextClean) ~ 0, # unpublished review texts 
+                                 nchar(reviewTextClean) < 2 ~ 0, # review texts less than 2 characters in length 
+                                 nchar(reviewTextClean) == 2 & grepl('ok',reviewTextClean) == FALSE ~ 0, # review texts of length 2, not being 'ok'
+                                 nchar(reviewTextClean) == 3 & grepl('top|wow|oke',reviewTextClean) == FALSE ~ 0, # review texts of length 3, not being 'top','wow','oke'
+                                 TRUE ~ 1))
+```
+
+After removing punctiation and lowcasing our texts let's check what are the review texts we're about to remove. Also, let's see what are most frequent full review texts we are planning to keep for now:
+
+```{r}
+# check most frequent reviews (and indicator to drop or not)
+data %>% 
+    group_by(reviewTextClean,validReview) %>% 
+    summarize(n_reviews=n()) %>% 
+    group_by(validReview) %>% 
+    arrange(validReview,desc(n_reviews)) %>% 
+    top_n(5,n_reviews) 
+```
+
+Looking all right, we drop the reviews with a 0 on validReview. To be able to identify unique reviews later, we also create a unique identifier. While we're at it, we also do some other cleaning on some features we might need later on.
+
+```{r}
+data <- data %>%
+  # remove all reviews that are not valid accoring to our rules defined earnier
+  filter(validReview==1) %>%
+  mutate(#create a unique identifier by combining the restaurant-id and the review-id that identifies unique reviews within a restaurant
+         restoReviewId = paste0(restoId,'_',review_id),
+         #some extra preparation on other features we have available: 
+         reviewDate = lubridate::dmy(reviewDate),
+         yearmonth=format(reviewDate,'%Y%m'),
+         waitingTimeScore = recode(waitingTimeScore,"Kort"=1, "Redelijk"=2, "Kan beter"=3, "Hoog tempo"=4, "Lang"=5, .default=0, .missing = 0),
+         valueForPriceScore = recode(valueForPriceScore,"Erg gunstig"=1, "Gunstig"=2, "Kan beter"=3, "Precies goed"=4, "Redelijk"=5, .default=0, .missing = 0),
+         noiseLevelScore = recode(noiseLevelScore,"Erg rustig"=1, "Precies goed"=2, "Rumoerig"=3, "Rustig"=4, .default=0, .missing = 0),
+         scoreFood = as.numeric(gsub(",", ".", scoreFood)),
+         scoreService = as.numeric(gsub(",", ".", scoreService)),
+         scoreDecor = as.numeric(gsub(",", ".", scoreDecor)),
+         reviewScoreOverall = as.numeric(gsub(",", ".", reviewScoreOverall)),
+         scoreTotal = as.numeric(gsub(",", ".", scoreTotal)),
+         reviewTextLength = nchar(reviewTextClean)
+        )
+```
+
+## Step 2: Preparing our data on the token level
+Now that we've done some cleaning on the review level we can look at the token level more closely. In NLP lingo, a token is a string of contiguous characters between two spaces. Therefore, we have to split our full review texts into sets of tokens. Next, we can answer questions like: How long should a review be to be of any value to us when we want to identify topics in the reviews? And: Do we want to use all tokens or are some tokens not that relevant for us and is it better to remove them?
+
+Here, we'll use the tidytext package for the first time, for tokenizing the review texts we have prepared. Tokenizing means splitting the text into separate tokens (here: words). After unnesting the tokens from the texts, we can evaluate the length of our restaurant reviews.
+
+```{r}
+## divide text into separate words
+reviews_tokens <- data %>% 
+    select(restoReviewId, reviewTextClean) %>%
+    unnest_tokens(word, reviewTextClean)  
+
+reviews_tokens %>% 
+  group_by(restoReviewId) %>% summarise(n_tokens = n()) %>% mutate(n_tokens_binned = cut(n_tokens, breaks = c(0,seq(25,250,25),Inf))) %>% 
+  group_by(n_tokens_binned) %>% summarise(n_reviews = n()) %>% 
+  ggplot(aes(x=n_tokens_binned,y=n_reviews)) + geom_bar(stat='identity',fill='blue') + theme_minimal() 
+```
+
+We're about to make a second decision with high impact on future analysis results: We only keep reviews with more than 50 tokens. This seems like a lot of information we're throwing away, however we expect that these short reviews won't help us much in identifying different topics within reviews. By doing so, we focus on ~40% of all reviews available, still around 145K reviews in total to work with:
+
+```{r}
+# count the reviews that have at least 50 tokens
+reviews_tokens <- reviews_tokens %>% group_by(restoReviewId) %>% mutate(n_tokens = n(),review_50tokens_plus = case_when(n_tokens > 50 ~1, TRUE ~ 0)) 
+
+reviews_tokens %>% group_by(review_50tokens_plus) %>% summarize(n_reviews = n_distinct(restoReviewId)) %>% mutate(pct_reviews = n_reviews/sum(n_reviews)) 
+```
+
+```{r}
+# aaaaaaaaaaaaaand, they are gone..............
+reviews_tokens <- reviews_tokens %>% filter(n_tokens>50)
+```
+
+## Something to consider: Stemming & Lemmatization
+Another possibly impactful text preprocessing step is stemming and lemmatizing your tokens. In short: This means trying to make your tokens more generic by replacing it by a more generic form. For plurals (e.g. restaurants) this would mean replacing it with singulars (restaurant), for verbs (tasting) to the root of the verb (taste). With stemming, the last part of the word is cut off to bring it to its more generic form, with lemmatization this is done a bit more thorough by taking into consideration the morphological analysis of the words. Both techniques have their pros and cons - computationally and in the usefullness of the resulting tokens - and depending on your research question you can choose to apply one or the other. Or you can decide that it's doing more harm than good in your case. After some explorations and literature reviews on Dutch stemming and Lemmatization techniques, we decided not to apply either stemming or lemmatization here. Again, in another context, we might choose differently. Since you should at least consider this possibly impactful textual data preparation step, we did want to mention it here as we also did consider it.
+
+## Stop words
+Now that we have our sets of prepared tokens, we need to specify which tokens won't be that useful to keep. In many cases, stop words have no added value and we're better off without them. Not always, especially not when your analysis focusses on the exact structure of the text or when you are specifically interested in the use of specific highly frequent words including stop words. Also, in sentiment analysis, usage of stop words might be relevant. However, we primarily want to distill the topics discussed by reviewers in the reviews. As a result, we're happy to focus on those terms that are not too frequent and tokens that help in revealing information relevant to our restaurant review context.
+
+There are - in many languages - many nice sources of stop words available. You can easily get your hands on these and use them as a basis for your own list of stopwords. In our experience, it is however wise to review and edit such a list of potential stop words carefully. We collected and customized the stop words from the stopwords library, containing many of these curated lists of stop words from various sources in various languages.
+
+```{r}
+# get stopwords from package stopwords
+stopwords_sw_iso <-stopwords::stopwords(language = 'nl',source='stopwords-iso')
+
+cat(paste0('Number of stop words from package stopwords (source=stopwords-iso): ',length(stopwords_sw_iso),'\n\n'))
+cat(paste0('First 50 stop words: ',paste(stopwords_sw_iso[1:50], collapse=', '),', ...'))
+```
+
+When reviewing these stopwords, we found that some could be quite relevant in our context of identifying topics people discuss when reviewing their restaurant experience. Words like gewoon (could mean plain), weinig (little food? little taste?), buiten (outside?) might be relevant and we don't want to drop those.
+
+```{r}
+# keep some stopwords
+excludefromstopwords <- c('gewoon', 'weinig', 'buiten', 'genoeg', 'samen', 'precies', 'vroeg', 'niemand', 'spoedig')
+stopwords_sw_iso <- stopwords_sw_iso[!stopwords_sw_iso %in% excludefromstopwords]
+cat(paste0('Number # of stop words after removing ',length(excludefromstopwords),' stop words: ',length(stopwords_sw_iso),'\n\n'))
+
+#add new stopwords
+extra_stop_words <- c('zeer', 'echt', 'goede', 'keer', 'terug', '2', 'helaas', '3', 'hele', 'allemaal', 'helemaal', '1', 'mee', 'elkaar'
+, 'fijne', '4', 'graag', 'best', 'erbij', 'echte', 'fijn', 'qua', 'kortom', 'nde', '5', 'volgende', 'waardoor','extra', 'zowel', '10', 'soms', 'nhet', 'heen', 'ontzettend', 'zn', 'regelmatig', 't', 'uiteindelijk', '6', 'diverse', 'xc3xa9xc3xa9n', 'absoluut', 'xe2x82xac', 'langs', 'keren', 'meerdere', 'direct', 'ok', 'mogelijk', 'waarbij', 'daarbij', 'a', '8', 'behoorlijk', 'enorm', '7', '20', 'redelijke', 'alsof', 'n', 'nou', 'ver', 'vele', 'oa', 'uiterst', '15', '2e', 'absolute', 'ipv', 'all','ter', 'you', 'wellicht', 'vast','name', 'den', 'the', 'midden', 'min','dezelfde', 'waarvan', 'can', 'ten', 'bijvoorbeeld', 'eat', '9', 'x', 'vaste', '25', 'uiteraard', 'zie', 'pp', '30', 'allerlei', 'enorme', 'nwij', 'okxc3xa9', 'erop', 'nik', 'ronduit', 'eenmaal', 'ivm', '50', 's', 'hierdoor', 'evenals', 'neen', 'nogmaals', 'hoor', '2x', 'allen', 'wijze', 'uitermate', 'flink', '12', 'doordat', 'mn', 'achteraf', 'flinke', 'daarvoor', 'ene', 'waarop', 'daarentegen', 'ervoor', 'momenteel', 'tevens', 'zeg', 'mede' )
+
+# create dataframe with stop words and indicator (useful for filtering later on)
+stop_words <- data.frame(word=unique(c(stopwords_sw_iso,extra_stop_words)),stringsAsFactors = F)
+stop_words <- stop_words %>% mutate(stopword=1)
+
+cat(paste0('Number of stop words after including ',length(extra_stop_words),' extra stop words: ',sum(stop_words$stopword)))
+```
+
+We're ready to drop the stop words. With a few printed reviews we can see that the total text has become more dense and a bit less readable to the human eye. However, as a result we now focus more on the relevant tokens in the review texts.
+
+Let's check the difference with and without our stopwords as we go, to get an impression of the impact.
+
+```{r}
+# First, let's check how a random review text looked before removing stopwords...
+examplereview = reviews_tokens %>% ungroup() %>% distinct(restoReviewId) %>% sample_n(size=1,seed=1234)
+data %>% filter(restoReviewId==pull(examplereview))  %>% select(reviewText) %>% pull() %>% paste0('\n\n') %>% cat()
+
+# remove stopwords
+reviews_tokens_ex_sw <- reviews_tokens %>% left_join(y=stop_words, by= "word", match = "all") %>%
+    filter(is.na(stopword))
+
+# ... and recheck how that review text looks after removing stopwords
+reviews_tokens_ex_sw %>% filter(restoReviewId==examplereview) %>% summarize(reviewText_cleaned=paste(word,collapse=' ')) %>% pull() %>% cat()
+```
+
+As this single example already shows, the number of tokens and thereby the review lengths have decreased, but the essential words are still present in the texts. Reading the text has become a bit more troublesome, though. Luckily we're going to use appropriate NLP techniques soon, enabling us to exact the essence of the reviews. Rerunning the review text length plot confirms that our reviews have shrunk in size:
+
+```{r}
+# check new lengths after removing stop words
+reviews_tokens_ex_sw %>% 
+  group_by(restoReviewId) %>% summarise(n_tokens = n()) %>% mutate(n_tokens_binned = cut(n_tokens, breaks = c(0,seq(25,250,25),Inf))) %>% 
+  group_by(n_tokens_binned) %>% summarise(n_reviews = n()) %>% 
+  ggplot(aes(x=n_tokens_binned,y=n_reviews)) + geom_bar(stat='identity',fill='orange') + theme_minimal() 
+```
+
+## Adding Bigrams
+So far we only talked about tokens as single words, but combinations of subsequent words - named bigrams for two adjacent words and trigrams for three - are also very useful tokens in many NLP tasks. Especially in English because, compared to other languages, words that belong together are often not combined in one token in English, like table cloth and waiting room whereas they are in other languages like Dutch (tafellaken and wachtkamer). Nevertheless, also in Dutch bigrams and trigrams are of value and for some NLP techniques we do use them.
+
+In the previous step, we identified and removed stopwords. Since we defined these terms to be irrelevant, we also want to remove bigrams for which at least one of the tokens is a stop word. We do need to perform identification of relevant bigrams on the texts prior to removing stopwords, otherwise we end up with many bigrams that actually were not present in the text but are a result of removing one or more intermediary terms. Hence, we go back to the texts with the stopwords included, create bigrams and only keep bigrams when no stop word is present in either of the terms in the bigram:
+
+```{r}
+# create bigrams with the unnest_tokens function, specifying the ngram lenght (2)
+bigrams <- reviews_tokens %>%
+    group_by(restoReviewId)  %>% summarize(reviewTextClean=paste(word,collapse=' ')) %>%
+    unnest_tokens(bigram, token = "ngrams",n = 2, reviewTextClean)
+
+print(paste0('Total number of bigrams: ',dim(bigrams)[1]))
+
+#remove bigrams containing stopwords
+bigrams_separated <- bigrams %>%
+    separate(bigram, c('word1', 'word2'), sep=" ")
+
+bigrams_filtered <- bigrams_separated %>%
+    filter(!word1 %in% stop_words$word & !word2 %in% stop_words$word)
+
+bigrams_united <- bigrams_filtered %>%
+    unite(bigram, word1, word2, sep = '_')
+
+print(paste0('Total number of bigrams without stopwords: ',dim(bigrams_united)[1]))
+
+# show most frequent bigrams
+top10_bigrams = bigrams_united %>% group_by(bigram) %>% summarize(n=n()) %>% top_n(10,wt=n) %>% select(bigram) %>% pull()
+print(paste0('Most frequent bigrams: ',paste(top10_bigrams,collapse=", ")))
+```
+
+When saving the prepared review text data, we'll combine the unigrams and bigrams. Since bigrams are not that useful in all other NLP techniques, we keep the bigrams in a separate field so we can easily include or exclude them when using different NLP techniques.
+
+## Extra feature: Review Sentiment
+Later on, we will combine the features we get from applying NLP techniques to the review texts with other features about the review. Earlier, we already did a bit of cleaning on some of the extra features, here we add a sentiment score to each review. Sentiment analysis is a broad field within NLP and can be done in serveral ways. Here, we take advantage of pretrained international sentiment lexicons that are made available by the Data Science Lab under GNU GLP licence. They provide lists of positive and negative words in many languages; using these lists we calculate a sentiment score by summing all positive words (+1) and all negative words (-1) and standardizing by the total number of positive/negative words in the text.
+
+```{r}
+#read in sentiment words from Data Science Lab (https://sites.google.com/site/datascienceslab/projects/multilingualsentiment)
+positive_words_nl <- read_csv("https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/positive_words_nl.txt", col_names=c('word'),col_types='c') %>% mutate(pos=1,neg=0) 
+negative_words_nl <- read_csv("https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/negative_words_nl.txt", col_names=c('word'),col_types='c') %>% mutate(pos=0,neg=1) 
+
+#combine positive and negative tokens and print statistics
+sentiment_nl <- rbind(positive_words_nl, negative_words_nl) 
+sentiment_nl %>% summarize(sentiment_words=n_distinct(word),positive_words=sum(pos),negative_words=sum(neg)) %>% print()
+
+# score sentiment for review texts
+review_sentiment <- data %>% select(restoReviewId, reviewTextClean) %>% unnest_tokens(word, reviewTextClean) %>%
+  left_join(sentiment_nl,by='word') %>% 
+  group_by(restoReviewId) %>% summarize(positive=sum(pos,na.rm=T),negative=sum(neg,na.rm=T)) %>% 
+  mutate(sentiment = positive - negative, 
+         sentiment_standardized = case_when(positive + negative==0~0,TRUE~sentiment/(positive + negative)))
+
+# plot histogram of sentiment score
+review_sentiment %>% ggplot(aes(x=sentiment_standardized))+ geom_histogram(fill='navyblue') + theme_minimal() +labs(title='histogram of sentiment score (standardized)')
+```
+
+## Is that it? How about....
+Yes, for now and for this analysis, this is all the generic textual data preparation we want to apply. You might have expected some other frequently used textual data manipulation techniques here, but we stop our textual data preparation here since we want to put enough of our sparse time and resources available in the next steps: text analytics! We are confident that we did what we needed to do, with our topic modeling in mind. Yes, again that mantra: Pick your battles, and pick them wisely!
+
+## Step 3: Saving the prepared review text data
+Now that we've analysed, filtered and cleaned our review texts, we can save the files as discussed in the beginning of this blog. So we can use them as our starting point in our next blogs.
+
+## reviews.csv
+csv file with review texts (original and cleaned) - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review)
+
+To generate a csv with only the restoReviewId and the cleaned review text, we take our processed reviews_tokens dataframe, group by the restoReviewId and combine the tokens into a text again.
+
+```{r}
+# original review text
+reviewText <- data %>% select(restoReviewId,reviewText) 
+# add cleaned review text
+reviewTextClean <- reviews_tokens_ex_sw %>% group_by(restoReviewId) %>% summarize(reviewTextClean=paste(word,collapse=' '))
+# add bigrams without stopwords
+reviewBigrams <- bigrams_united %>% group_by(restoReviewId) %>% summarize(bigrams=paste(bigram,collapse=' ')) 
+
+# combine original review text with cleaned review text
+reviews <- reviewText %>% inner_join(reviewTextClean,by='restoReviewId') %>% left_join(reviewBigrams,by='restoReviewId')
+
+#write to file
+write.csv(reviews,'reviews.csv',row.names=FALSE)
+```
+
+## labels.csv
+csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+We want to predict Michelin reviews based on the topics in the review texts. But how do we know a review is a review for a restaurant that has (had) a Michelin star?
+
+To be able to do so, some data ground work needed to be done. We had to delve through several sources with the names and addresses of Dutch Michelin restaurants over the past few years. Next, that list needed to be combined with the restaurants in our restaurant review source. Due to name changes, location changes and other things preventing automatic matching, this was mainly done by hand. This results in a list of restoIds (restaurant ids) that are restaurants that currently have or recently have had one or more Michelin stars (not Bib Gourmand or any other Michelin acknowledgement, only the stars count!).
+
+The csv file contains an indicator (1 / 0) named ind_michelin that tells whether a review (restoReviewId) is a review for a restaurant that is a Michelin restaurant. Hence, this file is already on the restoReviewId level and can easily be combined with the reviews.csv file.
+
+```{r}
+# read file with Michelin restoIds
+michelin <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/michelin_RestoIds.csv',header=TRUE,row.names = 'X')
+
+# create dataframe with per restaurant an indicator to specify it is a Michelin restaurant 
+df_michelin <- data.frame(restoId=michelin,ind_michelin=1)
+cat(paste0('Number of Michelin restaurants in dataset: ',nrow(df_michelin)))
+```
+
+```{r}
+# create dataframe with michelin indicator per review (filter reviews with prepared reviewText) 
+labels <- data %>% inner_join(reviews,by='restoReviewId') %>% left_join(df_michelin,by='restoId') %>% select(restoReviewId,ind_michelin) %>% mutate(ind_michelin=replace_na(ind_michelin,0))
+
+#count # of michelin reviews (and % of reviews that is for michelin restaurant)
+cat(paste0('Number of Michelin restaurant reviews: ',sum(labels$ind_michelin),' (',scales::percent(sum(labels$ind_michelin)/nrow(labels),accuracy=0.1),' of reviews)'))
+
+#save csv
+write.csv(labels,'labels.csv',row.names=FALSE)
+```
+
+## restoid.csv
+csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+
+To evaluate how good our predictions of Michelin / Non-Michelin are on the restaurant level, we need to know what reviews are for the same restaurant. This file contains the restoReviewId and the RestoId.
+
+```{r}
+# select ids for restaurant reviews and restaurants from prepared data (filter reviews with prepared reviewText)
+restoid <- data %>% inner_join(reviews,by='restoReviewId') %>% select(restoReviewId,restoId) 
+
+# save to file
+write.csv(restoid,'restoid.csv',row.names=FALSE)
+```
+
+## trainids.csv
+csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)
+
+Since the proportion of Michelin Restaurants is low, sampling might have a significant impact on the results of our NLP based models. To be able to compare results fairly, we already split the available reviews into reviews to be used for training and those to be used for testing our models.
+
+```{r}
+# gerenate a sample of 70% of restoReviews, used for training purposes (filter reviews with prepared reviewText)
+set.seed(101) 
+sample <- sample.int(n = nrow(data), size = floor(.7*nrow(data)), replace = F)
+data$train = 0
+data$train[sample] = 1
+trainids = data  %>% inner_join(reviews,by='restoReviewId') %>% select(restoReviewId,train) %>% filter()
+
+# save to file
+write.csv(trainids,'trainids.csv',row.names=FALSE)
+```
+
+## features.csv
+csv file with other features regarding the reviews (included key: restoreviewid)
+
+In the raw review data, we have more than only review texts available: details on the restaurant (name, location, average scores, number of reviews), the reviewer (id, user name, fame, number of reviews) and on the review (review scores). We want to focus on NLP to show you how to do that, but we also want to show you how to combine features created with NLP techniques with other features you might be more familiar with: numeric and categorical features. In the next blogs where we combine the derived text features with these other features, we will load this csv.
+
+```{r}
+# add sentiment score and select key and relevant features
+features <- data %>% 
+  inner_join(review_sentiment,by='restoReviewId') %>% 
+  select(restoReviewId, scoreTotal, avgPrice, numReviews, scoreFood, scoreService, scoreDecor, reviewerFame, reviewScoreOverall, 
+         reviewScoreFood, reviewScoreService,reviewScoreAmbiance, waitingTimeScore, valueForPriceScore, noiseLevelScore,reviewTextLength,sentiment_standardized) 
+
+# save to file
+write.csv(features,'features.csv',row.names=FALSE)
+```
+
+## Reading the files, ready to start analyzing!!
+Here's some code to read all the created files. Happy analyzing!!
+
+```{r}
+# **reviews.csv**: a csv file with review texts - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review) 
+reviews <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/reviews.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **labels.csv**: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+labels <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/labels.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **restoid.csv**: a csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+restoids <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/restoid.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **trainids.csv**: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)storage_download(cont, "blogfiles/labels.csv",overwrite =TRUE)
+trainids <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/trainids.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **features.csv**: a csv file with other features regarding the reviews (included key: restoreviewid)
+features <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/features.csv',header=TRUE,stringsAsFactors=FALSE)
+```
+
+-------------------------------------------------------------------------------------------------------------------
+
+# Article 2: Comparing strengths and weaknesses of NLP techniques
+
+## Topic Modeling to identify topics discussed in the restaurant reviews
+In a sequence of articles we compare different NLP techniques to show you how we get valuable information from unstructured text. About a year ago we gathered reviews on Dutch restaurants. We were wondering whether 'the wisdom of the croud' - reviews from restaurant visitors - could be used to predict which restaurants are most likely to receive a new Michelin-star. Read this post to see how that worked out. We used topic modeling as our primary tool to extract information from the review texts and combined that with predictive modeling techniques to end up with our predictions.
+
+We got a lot of attention with our predictions and also questions about how we did the text analysis part. To answer these questions, we will explain our approach in more detail in the coming articles. But we didn't stop exploring NLP techniques after our publication, and we also like to share insights from adding more novel NLP techniques. More specifically we will use two types of word embeddings - a classic Word2Vec model and a GLoVe embedding model - we'll use transfer learning with pretrained word embeddings and we use BERT. We compare the added value of these advanced NLP techniques to our baseline topic model on the same dataset. By showing what we did and how we did it, we hope to guide others that are keen to use textual data for their own data science endeavours.
+
+In a previous article, we showed how we prepared our data to be used for various NLP techniques. Here, we commence our series of articles on NLP techniques by introducing Topic Modeling and show you how to identify topics, visualise topic model results. In a later article, we show you how to use the topic model results in a predictive model.
+
+## What is Topic Modeling?
+
+To discover the topics that restaurant reviewers write about in their restaurant reviews, we use Topic Modeling. But what is a Topic Model? In machine learning and natural language processing, a topic model is a type of statistical model that can be used for discovering the abstract topics that occur in a collection of documents. There are a number of algorithms to extract topics from a collection of texts, but the Latent Dirichlet Allocation is one of the most popular algorithms because it is efficient en results in highly interpretable topics. Interpretability of topics is an important feature of a topic model, since we do not only want to find statistically relevant groupings of words, we also want to be able to label the identified topics with a topic name that others can relate to. As such, topic modeling has some similarities to clustering techniques like KMeans, where interpretation is also as important as statistical metrics are in determining what is a 'good' solution. How topic modeling / LDA works, is visualised by Blei as:
+
+As the figure shows:
+Each topic is a distribution over words
+Each document is a distribution over topics
+
+So after we are done topic modeling our reviews:
+we shoud know wat are topics or subjects that reviewers write about in their restaurant reviews,
+we know what tokens or words are most important in these topics, and
+we can tell for each individual review to what extent it is about the identified topics and this can be a mix - 80% about topic X and 20% about topic Y.
+
+## Step 0: Setting up our context
+First, we set up our workbook environment with the required packages to perform topic modeling.
+
+In our blog on preparing the textual data we already briefly introduced tidyverse and tidytext. Here, we add a few other packages to the list:
+
+topicmodels is a package to estimate topic models with LDA and builds upon data structures created with the tm package
+tm is a powerful, generic package with all sorts of text mining functionality, among which creating document term matrices, which we need for topic modeling
+ldavis is a great package to visualise and interpret the topic model and a very helpful when labeling topics
+
+```{r}
+# Loading packages 
+library(tidyverse)
+library(tidytext)
+library(topicmodels)
+library(tm)
+library(LDAvis)
+```
+
+```{r}
+#set size of plots
+options(repr.plot.height = 400, repr.plot.width = 1000, repr.plot.res = 100)
+```
+
+## Step 1. Load preprocessed data (read previous blog for details)
+Before we delve into the analytical side of things, we need some prepared textual data. As all true data scientists know, proper data preparation takes most of your time and is most decisive for the quality of the analysis results you end up with. Preparing textual data is another cup of tea compared to preparing structured numeric or categorical data. In this blog our focus is on text analytics. Yet we do want to show you how we cleaned and prepared the data we gathered. In this previous blog, we explain in detail how we preprocessed the data, resulting in the following 5 files we can use in our NLP analytics:
+
+
+reviews.csv: a csv file with original and prepared review texts - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review)
+labels.csv: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+restoid.csv: a csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+trainids.csv: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)
+features.csv: a csv file with other features regarding the reviews (included key: restoreviewid)
+
+These files with the cleaned and relevant data for NLP techniques are made available to you via public blob storage so that you can run all code we present yourself and see how things work in more detail. For our topic model, we need three of these files:
+
+```{r}
+# **reviews.csv**: a csv file with review texts - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review) 
+reviews <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/reviews.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **labels.csv**: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+labels <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/labels.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **trainids.csv**: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)storage_download(cont, "blogfiles/labels.csv",overwrite =TRUE)
+set.seed(1234)
+trainids <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/trainids.csv',header=TRUE,stringsAsFactors=FALSE) %>% mutate(rv = runif(nrow(.)))
+```
+
+## Step 2: Prepare data for topic modeling
+Starting from the cleaned review texts, we have to do some things before we can estimate our topic models:
+
+Tokenize our prepared text (including bigrams)
+Sample reviews for training our topic model
+Filter relevant tokens
+Create Document Term Matrix
+
+## 2.1. Tokenize our prepared text (including bigrams)
+Latent Dirichlet Allocation (LDA), the technique we use for topic modeling, is a 'bag of words' technique. What this means, is that the NLP technique does not look at the order of the tokens when analyzing the text. Hence, where the token is located in the text and what other tokens are close to the token (preceding / subsequent tokens) within the document is not considered. It's like all tokens from the document text are thrown into a bag, mixing them up but retaining the information that the tokens are in the same document. As a result, we might miss out on crucial information if a lot of interesting collocations - frequent combinations of tokens - are present in the text. Popular examples are names of people ('Donald Trump','Jonnie Boer') or places ('United States', 'Den Haag') but also context-specific combinations of words might be important to include in our topic model: 'witte wijn' ('white wine'), 'rode wijn', ('red wine'), 'gaan eten' ('go eat'). To make sure we don't miss out on these important collocations, we add the prepared bigrams that are present in our text. Remember that we already removed stopwords and interpunction in our dataprep.
+
+After adding bigrams to the loaded, cleaned texts, we split the texts again to end up with a dataframe where each row is a review - token combination. We filter out reviews that have become too short (<25 tokens) after removing stop words. In this format, we're ready for our last preparations before we can start modeling topics.
+
+```{r}
+## combine unigrams and bigrams into reviewTextClean and divide text into separate words
+reviews_tokens <- reviews %>% 
+    mutate(reviewTextClean = paste0(reviewTextClean,bigrams)) %>%
+    select(restoReviewId, reviewTextClean) %>%
+    unnest_tokens(token, reviewTextClean) %>%
+    group_by(restoReviewId) %>% mutate(n_tokens = n()) %>% filter(n_tokens>=25) %>% ungroup() %>% select(-n_tokens) # filter out reviews with less than 25 tokens
+
+# summarize result after tokenization
+str(reviews_tokens)
+```
+
+## 2.2 Sample reviews for training our topic model
+In our next step, we will filter the most relevant tokens to include in the document term matrix and subsequently in topic modeling. But first we need to determine which documents (reviews) are most important to us. For some reasons we do not want to use all reviews as input for our topic model:
+
+In the end, we want to use the topics in a prediction model to predict Michelin stars. It's best practice to set aside a test set before we build the topic model and use its outcomes in the downstream predictive task. This way we build both our topic model and our prediction on train data and keep test data unseen until evaluation.
+As shown below, no more than 3% of all reviews are Michelin reviews. By increasing the proportion of michelin reviews in the train set we use for topic modeling, it is more likely that specific topics that are discussed in michelin reviews will be identified.
+For these reasons, we will focus the rest of the preparation towards our topic model and estimation of the topic models on a subset of reviews. This subset contains only reviews that are already specified as training cases in our data preparation notebook. Within this subset, we take all michelin reviews (about 3.000) and complement with non-michelin reviews to end up with around 10.000 reviews:
+
+```{r}
+# what % of all reviews are Michelin reviews?
+labels %>% group_by(ind_michelin) %>% summarize(n=n()) %>% mutate(pct=scales::percent(n/sum(n)))
+```
+
+```{r}
+# sample reviews: Take all michelin train reviews and complement with non-michelin train cases to include 10K reviews in total
+reviews_tokens_train <- reviews_tokens %>% inner_join(labels,by = "restoReviewId") %>% inner_join(trainids,by = "restoReviewId") %>% 
+    mutate(train_smpl = case_when(train==1 & ind_michelin == 1 ~ 1, # sample all reviews that are michelin review and in the train subset 
+                                  train==1 & rv < (7100/95000) ~ 1, # complete 10K sample by adding 7.1K reviews from non-michelin train reviews 
+                                  TRUE~0))  # all other reviews are not in the train_smpl 
+
+# what reviews will we keep?
+reviews_tokens_train %>% group_by(train_smpl,train,ind_michelin) %>% summarize(n_reviews=n_distinct(restoReviewId),n_tokens=n_distinct(token)) %>% print()
+
+#create train data using train_smpl as filter
+reviews_tokens_train <- reviews_tokens_train %>% filter(train_smpl == 1)
+
+sprintf('%s unique reviews and %s unique tokens selected to train topic model',n_distinct(reviews_tokens_train$restoReviewId),n_distinct(reviews_tokens_train$token))
+```
+
+## 2.3 Filter tokens
+
+Now that we've added bigrams to the tokens and we've re-tokenized our texts, we still have many, many unique tokens available for our topic model. It's best practice to get rid of the longtail of infrequent terms. Let's first have a look at what the distribution of token frequency looks like. Remember that in our data preparation blog we already removed all stop words from the texts, including 128 custom high frequency 'stop' words that we specified by looking at the token frequency in preparing the data.
+
+```{r}
+reviews_tokens_train %>% 
+  group_by(token) %>% summarize(token_freq=n()) %>% 
+  mutate(token_freq_binned = case_when(token_freq>20~20,TRUE~as.numeric(token_freq))) %>% 
+  group_by(token_freq_binned) %>% summarise(n_tokens = n()) %>% 
+  mutate(pct_tokens = n_tokens/sum(n_tokens),
+         cumpct_tokens = cumsum(n_tokens)/sum(n_tokens)) %>% 
+  ggplot(aes(x=token_freq_binned)) + 
+          scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + 
+          geom_bar(aes(y=pct_tokens),stat='identity',fill='blue') +  
+          geom_line(aes(y=cumpct_tokens),stat='identity',color='orange',linetype='dashed') + 
+          geom_text(aes(y=cumpct_tokens,label=scales::percent(cumpct_tokens,accuracy=1)),size=3) + 
+          theme_minimal() + 
+          ggtitle("Frequency of token in Corpus (all reviews)") + xlab("token frequency") + ylab("% of all tokens")
+```
+
+The plot above clearly shows that a huge amount of the unique tokens occurs rarely in all the reviews, 75% occurs only once.
+
+## Focus on tokens that occur 5 times or more in train Corpus
+As we can see from the token frequency count, there are a lot of tokens that occur only once or a few times: Around 92% of all unique tokens occur less than 5 times in our corpus of reviews. These low frequency tokens impact the topic model analysis. To focus on frequently used tokens, we select tokens that occur 5 times or more in the prepared train data. This is hopefully enough to learn topics from tokens that occur together in the same reviews. In optimizing our topic model, we can vary the minimum frequency to evaluate impact on results.
+
+## Why not TF-IDF?
+
+Having read some on text analytics tools, you might wonder: Why don't we use TF-IDF to select most relevant tokens? TF-IDF stands for Term Frequency - Inverse Document Frequency. This metric combines the Term Frequency - how often is the token present in a document? - with the Inverse of the Document Frequency - in how many unique documents is the term present? Although the TF-IDF is often a good choice to select most relevant tokens, it is not in our context, where the document size is limited and reoccurence of the same token in the same text is low. Not often, a token has a Term Frequency above 1. As a result, only the Inverse Document Frequency part is decisive and this favours the tokens that only occur in one or two reviews. For this reason, we do not use TF-IDF here, but look at overall frequency to pick relevant tokens for topic modeling. Also because we already removed the custom list of stop words from our text, hence too frequent tokens are already removed.
+
+By filtering the infrequent tokens, we've decreased the number of tokens to consider in our LDA dramatically, focussing on the 12K (8%) most frequent tokens and removing the 146K (92%) tokens that are too infrequent in the corpus. These selected tokens do still represent 73% of all the tokens in the documents though:
+
+```{r}
+reviews_tokens_train %>% 
+  group_by(token) %>% summarize(token_freq=n()) %>% 
+  mutate(min_5_freq = case_when(token_freq<5~'token frequency: <5',TRUE~'token frequency: >=5')) %>% 
+  group_by(min_5_freq) %>% summarise(n_unique_tokens = n(),n_tokens=sum(token_freq)) %>% 
+  mutate(pct_unique_tokens = scales::percent(n_unique_tokens / sum(n_unique_tokens)),pct_all_tokens=scales::percent(n_tokens / sum(n_tokens))) 
+```
+
+## 2.4 Create DTM
+After filtering the tokens we want to use to build our topic model, we can create the input for LDA. This requires a document-term-matrix or DTM hence a matrix with in the rows all our documents (reviews) and in the columns all the terms (the relevant tokens). Do note that we use the overall token frequency for the value parameter. You might expect the document specific term frequency here, however we use the overall token frequency to give much more emphasis in finding the topic model to terms that are more frequent in general; given the short length of reviews (compared to books or articles that are often used in topic modeling) the probability of a single token to occur more often in the review is limited.
+
+```{r}
+# remove infrequent tokens
+reviews_tokens_train_smpl <- reviews_tokens_train %>% 
+  group_by(token) %>% mutate(token_freq=n()) %>%  filter(token_freq>=5)
+
+# create document term matrix
+dtm <- reviews_tokens_train_smpl %>% 
+  cast_dtm(document = restoReviewId,term = token,value = token_freq)
+
+#check dimenstions of dtm
+cat(paste0('DTM dimensions: Documents (',dim(dtm)[1],') x Tokens (',dim(dtm)[2],')',' (average token frequency: ',round(sum(dtm)/sum(dtm!=0),2),')'))
+DTM dimensions: Documents (10152) x Tokens (12525) (average token frequency: 702.3)
+```
+
+## Step 3: Develop Topic model
+Now that we have a DTM, we're ready to start topic modeling! So far, we already made quite some choices with impact on our analysis result: what minimal review length to use, what stopwords to exclude, what n-grams to include, the minimal token frequency to use tokens... And a few more choices need to be made.
+
+LDA has a number of parameters that impact the outcome, of which the most important are:
+
+k: The number of topics! Yes, this is a parameter and not an outcome. Similar to clustering techniques like KMeans, you need to tell how many clusters/topics you want to identify.
+method: The topicmodels package enables different optimization methods, VEM algorithm or Gibbs sampling, default is VEM.
+control: list of control variables to guide estimation - relevant parameters depend on chosen method VEM or Gibbs but most important ones are:
+nstart: The number of runs to perform with the same settings but different seeds
+seed: For reproducibility a random seed can be set. If nstart > 1, you need to provide multiple seeds, 1 per nstart (eg. c('123','234','345'))
+best: If TRUE (default), only the run with the best fitting result is kept, of set, if FALSE a list of all runs is returned so you can examine all of them.
+For a full overview of all parameters and settings available, see the topicmodels package vignette.
+
+## Estimate LDA Topic Model
+
+Most impactful parameter is k: the number of topics to identify. How to pick a value for k? This is partly a result of discussion (what number of topics do we expect to find in this context?) and trial & error (try different values of k, evaluate results). Some data scientists might not like this, they prefer to look at statistics to guide them in this process, but for those familiar with other unsupervised data science techniques like KMeans this is not that new. Clustering and also topic modeling is to some extent more art than science. Guided by statistical techniques and measures, a data scientist sculpts a topic modeling solution that fits the (business) needs. In case you do need a starting point for k with some statistical background, you can try this approach or this approach.
+
+Let's start with a topic model to identify 3 topics and explore the result. We have no reason to change any other defaults at this point.
+
+```{r}
+lda_fit <- LDA(dtm, k = 3)
+```
+
+## Evaluate Topic Model
+Topic model is fitted, so, let's explore!
+
+The fitted lda object contains a number of matrices:
+
+phi: matrix with distribution of tokens (in rows) over topics (in columns)
+theta: matrix with distribution of documents (hence: reviews, in rows) over topics (in columns)
+Both for phi and for theta, the sum over all columns is equal to 1, meaning:
+
+For phi, the sum of all token scores within a topic is 1 - higher scores meaning higher importance of that token within the topic.
+For theta, the sum of all topic scores within a document is 1 - higher scores meaning the topic is more present in that document.
+
+```{r}
+# phi (topic - token distribution matrix) -  topics in rows, tokens in columns:
+phi <- posterior(lda_fit)$terms %>% as.matrix
+cat(paste0('Dimensions of phi (topic-token-matrix): ',paste(dim(phi),collapse=' x '),'\n'))
+cat(paste0('phi examples (8 tokens): ','\n'))
+phi[,1:8] %>% as_tibble() %>% mutate_if(is.numeric, round, 5) %>% print()
+
+# theta (document - topic distribution matrix) -  documents in rows, topic probs in columns:
+theta <- posterior(lda_fit)$topics %>% as.matrix
+cat(paste0('\n\n','Dimensions of theta (document-topic-matrix): ',paste(dim(theta),collapse=' x '),'\n'))
+cat(paste0('theta examples (8 documents): ','\n'))
+theta[1:8,] %>% as_tibble() %>% mutate_if(is.numeric, round, 5) %>% setNames(paste0('Topic', names(.))) %>% print()
+```
+
+To explore our topic model, let's start by looking at the most important tokens per topic. To do so, we need to specify when a token is important for a topic. We could argue that the token is important for the topic when it has a high probability to occur within a topic p(token|topic). Let's see how this looks for our 3-topics topic model. We'll use a neat function of the tidytext package, that helps preparing the topic model data to visualise most important tokens per topic: tidy().
+
+```{r}
+# get token probability per token per topic
+topics <- tidy(lda_fit)
+
+# only select top-10 terms per topic based on token probability within a topic
+plotinput <- topics %>%
+  mutate(topic = as.factor(paste0('Topic',topic))) %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# plot highest probability terms per topic
+names <- levels(unique(plotinput$topic))
+colors <- RColorBrewer::brewer.pal(n=length(names),name="Set2")
+
+plist <- list()
+
+for (i in 1:length(names)) {
+  d <- subset(plotinput,topic == names[i])[1:10,]
+  d$term <- factor(d$term, levels=d[order(d$beta),]$term)
+  
+  p1 <- ggplot(d, aes(x = term, y = beta, width=0.75)) + 
+  labs(y = NULL, x = NULL, fill = NULL) +
+  geom_bar(stat = "identity",fill=colors[i]) +
+  facet_wrap(~topic) +
+  coord_flip() +
+  guides(fill=FALSE) +
+  theme_bw() + theme(strip.background  = element_blank(),
+                     panel.grid.major = element_line(colour = "grey80"),
+                     panel.border = element_blank(),
+                     axis.ticks = element_line(size = 0),
+                     panel.grid.minor.y = element_blank(),
+                     panel.grid.major.y = element_blank() ) +
+  theme(legend.position="bottom") 
+
+  plist[[names[i]]] = p1
+}
+
+library(gridExtra)
+do.call("grid.arrange", c(plist, ncol=3))
+```
+
+With this plot, we get a first feel of what the topics in our first topic model represent. As we can see from the plot, looking at the token probability per topic has the downside that tokens that have a high overall frequency have a higher probability to show up in the top-10 for multiple topics. For instance restaurant shows up in multiple topic top-10s. Only looking at the overall topic probabilities might hide that specific somewhat less frequent tokens are very related to a specific topic. To analyse that, we can make the token frequency in the topic relative to the overall frequency of the token: p(token|topic)/p(token). This shows what tokens are strongly related to the topic, independent of token frequency.
+
+Taking (only) the latter approach has it's own downside, highlighting important tokens that might not occur in that many reviews. The best approach might be somewhere in the middle: To evaluate a topic model, it's most valuable to be able to explore the topic model from both perspectives -absolute term probability and relative term probability - and maybe even a mix of the two. For this reason, the package LDAvis is so valuable because it enables you to do exactly that! LDAvis needs a JSON containing information about your topic model and vocabulary:
+
+```{r}
+# phi (topic - token distribution matrix) -  tokens in rows, topic scores in columns:
+phi <- posterior(lda_fit)$terms %>% as.matrix 
+
+# theta (document - topic distribution matrix) -  documents in rows, topic probs in columns:
+theta <- posterior(lda_fit)$topics %>% as.matrix 
+
+# number of tokens per document
+doc_length <- reviews_tokens_train_smpl %>% group_by(restoReviewId) %>% summarize(doc_length=n()) %>% select(doc_length) %>% pull() 
+
+# vocabulary: unique tokens
+vocab <- colnames(phi) 
+
+# overall token frequency
+term_frequency <- reviews_tokens_train_smpl %>% group_by(token) %>% summarise(n=n()) %>% arrange(match(token, vocab)) %>% select(n) %>% pull() 
+
+
+# create JSON containing all needed elements
+json <- createJSON(phi, theta, doc_length, vocab, term_frequency)
+```
+
+A side note here: the LDAvis R package can be used from R or RStudio but not directly from a notebook environment like Jupyter or Databricks. Therefore, we used the pyLDAvis port to the LDAvis package, since this makes it easy to include the wonderful LDAvis tool in a notebook. However, in some browsers the pyLDAvis is not working properly. If this happens, please see an example below. Feel free to download this notebook (link at the end of the blog) and try the LDAvis for yourself.
+
+To run LDAvis locally with R or RStudio, you can run:
+
+```{r}
+# render LDAvis - NOT RUN HERE - in RStudio, it opens a new window with the interactive LDAvis tool
+
+serVis(json) 
+```
+
+```{r}
+#since LDAvis package cannot be used in notebook, we use pyLDAvis, which can be used in notebook . We need to export the R topic model output to use in python's pyLDAvis
+
+# save needed model outputs for pyLDAvis (write to driver so that python can easily see it)
+write.csv(phi,'/databricks/driver/phi.csv',row.names = FALSE)
+write.csv(theta,'/databricks/driver/theta.csv',row.names = FALSE)
+write.csv(vocab,'/databricks/driver/vocab.csv',row.names = FALSE)
+write.csv(doc_length,'/databricks/driver/doc.length.csv',row.names = FALSE)
+write.csv(term_frequency,'/databricks/driver/term.frequency.csv',row.names = FALSE)
+
+print('csv files saved to folder /databricks/driver')
+```
+
+```{python}
+#workaround (pyLDAvis to show LDAvis in Notebook, not as html) - https://github.com/bmabey/pyLDAvis/issues/138
+import pyLDAvis
+pyLDAvis.enable_notebook()
+
+import json
+import numpy as np
+import pandas as pd
+import os
+
+# for unknown reason, saving as JSON and reading in python results in changed values in phi!! Therefore all needed object are saved separately as .csv
+# with open("/tmp/Rserv/conn10378/lda_list.json") as f:
+#     lda_list_py = json.load(f)
+# print('rowSums phi:',np.array(lda_list_py['phi']).sum(axis=1))
+# print('colSums theta:',np.array(lda_list_py['theta']).sum(axis=0))
+# np.array(lda_list_py['phi']).shape    
+
+# def load_R_model(filename):
+#     with open(filename, 'r') as j:
+#         data_input = json.load(j)
+#     data = {'topic_term_dists': data_input['phi'], 
+#             'doc_topic_dists': data_input['theta'],
+#             'doc_lengths': data_input['doc.length'],
+#             'vocab': data_input['vocab'],
+#             'term_frequency': data_input['term.frequency']}
+#     return data
+
+
+lda_model_data = {'topic_term_dists': pd.read_csv('/databricks/driver/phi.csv'), 
+            'doc_topic_dists': pd.read_csv('/databricks/driver/theta.csv'),
+            'doc_lengths': pd.read_csv('/databricks/driver/doc.length.csv').iloc[:,0],
+            'vocab': pd.read_csv('/databricks/driver/vocab.csv').iloc[:,0],
+            'term_frequency': pd.read_csv('/databricks/driver/term.frequency.csv').iloc[:,0]}
+
+
+ldavis_data = pyLDAvis.prepare(**lda_model_data)
+
+# Once you have the visualization data prepared you can do a number of things with it. You can [save the vis](https://pyldavis.readthedocs.org/en/latest/modules/API.html#pyLDAvis.save_html) to an stand-alone HTML file, [serve it](https://pyldavis.readthedocs.org/en/latest/modules/API.html#pyLDAvis.show), or [display it](https://pyldavis.readthedocs.org/en/latest/modules/API.html#pyLDAvis.display) in the notebook. Let's go ahead and display it:
+/databricks/python/lib/python3.7/site-packages/past/builtins/misc.py:45: DeprecationWarning: the imp module is deprecated in favour of importlib; see the module's documentation for alternative uses
+  from imp import reload
+```
+
+```{r}
+# Qing Lin:
+# Some code here to make the interactive graph but I can't see the code.
+#
+```
+
+## Iterations towards your winning Topic Model
+
+We said it before: topic modeling is - just like cluster analysis and other unsupervised machine learning techniques - more art than science! Therefore, you are probably going to spend quite some time tweaking your topic model before you end up with your 'best' Topic Model. We put 'best' in quotes here because what is 'best' depends heavily on both the applications you have in mind with your topic model and your creativity! So this is quite subjective! During the process of finding your 'best' topic model, you probably have some moments that you think you won't come up with any solution you can use and other moments that you experience the ecstasy of seeing those intrinsic topics coming to live through the tokens that dominate it. In carving your optimal topic model, here are your most important tools:
+
+change k - the number of topics
+exclude extra 'too dominant (frequent)' tokens (these might still be too dominant and surpress finding more interesting subdomains in your text)
+increase the minimal token frequency to focus on the more dominant tokens
+sample documents to focus on the most relevant documents to find important topics, we could change the sampling strategy
+Aside from these parameters, you also have some LDA parameters you can vary, but in our experience the parameters above are the most important ones to start with. Whereas increasing or decreasing k only means you have to re-estimate your LDA, changing the sampling of reviews or the tokens to consider means you also have to recreate your DTM.
+
+What did we do? After lots of sweat, some cursing and exploring many solutions, we did the following:
+
+change k to 7 topics.
+Merge some tokens and exclude a number of too frequent tokens
+Explore multiple seed results (with nstart and best=FALSE) to find best interpretable topic model**
+Finally, select best seed and set best=TRUE to keep the best LDA model only
+** The LDA function enables to do multiple runs by specifying the nstart parameter to set the number of runs and with seed set the seeds to guide these runs. When setting best=TRUE only the solution with the best log likelihood is preserved, setting it to best=FALSE enables you to explore all the topic models (the returned object is now a list of all topic models).
+
+Iterating and comparing outcomes resulted in 7 topics we could label nicely with topic names of subjects that reviewers talk about when reviewing restaurants. Here's our solution for the topics with the labels already added to them:
+
+```{r}
+# modify the tokens to consider in topic model
+reviews_tokens_train_smpl_new <- reviews_tokens_train %>%
+  # remove infrequent tokens (<5)
+  group_by(token) %>% mutate(token_freq=n()) %>%  filter(token_freq>=5) %>% ungroup() %>%
+  # combine some tokens that are dominant in solutions and represent same meaning
+  mutate(token = case_when(token == 'gerechten' ~ 'gerecht', token == 'wijnen' ~ 'wijn', token == 'smaken' ~ 'smaak', token == 'vriendelijke' ~ 'vriendelijk',TRUE~token)) %>% 
+  # remove some 'too frequent' tokens 
+  filter(!token  %in% c('goed','eten','restaurant','lekker','gegeten','komen','gaan','kregen','heerlijk','heerlijke','prima','kwam', 'mooi','mooie','leuk','leuke',
+                        'lekker','lekkere','jammer','weinig','gezellig','gezellige', 'voldoende','uitstekend','attent','grote'))  
+
+
+# recreate the document term matrix after modifying the tokens to consider
+dtm_new <- reviews_tokens_train_smpl_new %>% 
+    cast_dtm(document = restoReviewId,term = token,value = token_freq)
+
+#check dimensions of dtm
+cat(paste0('DTM dimensions: Documents (',dim(dtm_new)[1],') x Tokens (',dim(dtm_new)[2],')',' (average token frequency: ',round(sum(dtm_new)/sum(dtm_new!=0),2),')'))
+
+# estimate lda with k topics, set control variables nstart=n to have n runs, best=FALSE to keep all run results and set the seed for reproduction
+lda_fit_def <- LDA(dtm_new, k = 7,control = list(nstart=1,best=TRUE,seed=5678))
+saveRDS(lda_fit_def,'lda_fit_def.RDS')
+```
+
+```{r}
+#since LDAvis package cannot be used in notebook, we use pyLDAvis, which can be used in notebook . We need to export the R topic model output to use in python's pyLDAvis
+# phi (topic - token distribution matrix) -  tokens in rows, topic scores in columns:
+phi <- posterior(lda_fit_def)$terms %>% as.matrix 
+
+# theta (document - topic distribution matrix) -  documents in rows, topic probs in columns:
+theta <- posterior(lda_fit_def)$topics %>% as.matrix 
+
+# number of tokens per document
+doc_length <- reviews_tokens_train_smpl_new %>% group_by(restoReviewId) %>% summarize(doc_length=n()) %>% select(doc_length) %>% pull() 
+
+# vocabulary: unique tokens
+vocab <- colnames(phi) 
+
+# overall token frequency
+term_frequency <- reviews_tokens_train_smpl_new %>% group_by(token) %>% summarise(n=n()) %>% arrange(match(token, vocab)) %>% select(n) %>% pull() 
+
+# use tsne method to calculate distance between topics (default sometimes fails - https://www.rdocumentation.org/packages/LDAvis/versions/0.3.2/topics/createJSON) 
+library(tsne)
+svd_tsne <- function(x) tsne(svd(x)$u) 
+
+# create JSON containing all needed elements
+json <- createJSON(phi, theta, doc_length, vocab, term_frequency,mds.method=svd_tsne)
+
+# render LDAvis - NOT RUN HERE - in RStudio, it opens a new window with the interactive LDAvis tool
+serVis(json) # press ESC or Ctrl-C to kill
+```
+
+```{r}
+# save needed model outputs for pyLDAvis (write to driver so that python can easily see it)
+write.csv(phi,'/databricks/driver/phi_new.csv',row.names = FALSE)
+write.csv(theta,'/databricks/driver/theta_new.csv',row.names = FALSE)
+write.csv(vocab,'/databricks/driver/vocab_new.csv',row.names = FALSE)
+write.csv(doc_length,'/databricks/driver/doc.length_new.csv',row.names = FALSE)
+write.csv(term_frequency,'/databricks/driver/term.frequency_new.csv',row.names = FALSE)
+
+
+print('csv files saved to folder /databricks/driver')
+```
+
+```{python}
+%py
+#workaround (pyLDAvis to show LDAvis in Notebook, not as html) - https://github.com/bmabey/pyLDAvis/issues/138
+import pyLDAvis
+pyLDAvis.enable_notebook()
+
+import json
+import numpy as np
+import pandas as pd
+import os
+
+lda_model_data = {'topic_term_dists': pd.read_csv('/databricks/driver/phi_new.csv'), 
+            'doc_topic_dists': pd.read_csv('/databricks/driver/theta_new.csv'),
+            'doc_lengths': pd.read_csv('/databricks/driver/doc.length_new.csv').iloc[:,0],
+            'vocab': pd.read_csv('/databricks/driver/vocab_new.csv').iloc[:,0],
+            'term_frequency': pd.read_csv('/databricks/driver/term.frequency_new.csv').iloc[:,0]}
+
+ldavis_data_new = pyLDAvis.prepare(**lda_model_data)
+
+# Once you have the visualization data prepared you can do a number of things with it. You can [save the vis](https://pyldavis.readthedocs.org/en/latest/modules/API.html#pyLDAvis.save_html) to an stand-alone HTML file, [serve it](https://pyldavis.readthedocs.org/en/latest/modules/API.html#pyLDAvis.show), or [display it](https://pyldavis.readthedocs.org/en/latest/modules/API.html#pyLDAvis.display) in the notebook. Let's go ahead and display it:
+pyLDAvis.display(ldavis_data_new)
+/databricks/python/lib/python3.7/site-packages/pyLDAvis/_prepare.py:223: RuntimeWarning: divide by zero encountered in log
+  kernel = (topic_given_term * np.log((topic_given_term.T / topic_proportion).T))
+/databricks/python/lib/python3.7/site-packages/pyLDAvis/_prepare.py:240: RuntimeWarning: divide by zero encountered in log
+  log_lift = np.log(topic_term_dists / term_proportion)
+/databricks/python/lib/python3.7/site-packages/pyLDAvis/_prepare.py:241: RuntimeWarning: divide by zero encountered in log
+  log_ttd = np.log(topic_term_dists)
+```
+
+In some browsers the pyLDAvis is not working properly. Is this happens, please see an example below. Feel free to download this notebook (link at the end of the blog) and try the LDAvis for yourself.
+
+Although some topics are still a mix of things, we are happy to use this solution in predicting Michelin stars. We do see some clear distinctions between the identified topics and we expect that translating the raw text of each review into a vector of probabilities for these topics will help in predicting Michelin stars. Here's an overview of the topics with the labels we give them and their most frequent tokens:
+
+```{r}
+# get token probability per token per topic
+topics <- tidy(lda_fit_def)
+
+topiclabels <- data.frame(topic=seq(1,7),
+                          label=c('Hospitality [6]','Tastes & Courses [2]','Culinary Experience & Wines [4]','Atmosphere [5]',
+                                  'Price/Quality [3]','Plate details [7]','Waiter & Waitress [1]'))
+
+# only select top-10 terms per topic based on token probability within a topic
+plotinput <- topics %>% 
+  inner_join(topiclabels,by="topic") %>%
+  group_by(label) %>%
+  top_n(10, beta) %>% 
+  ungroup() %>%
+  arrange(label, -beta)
+
+# plot highest probability terms per topic
+names <- levels(unique(plotinput$label))
+colors <- RColorBrewer::brewer.pal(n=length(names),name="Set2")
+
+plist <- list()
+
+for (i in 1:length(names)) {
+  d <- subset(plotinput,label == names[i])[1:10,]
+  d$term <- factor(d$term, levels=d[order(d$beta),]$term)
+  
+  p1 <- ggplot(d, aes(x = term, y = beta, width=0.75)) + 
+  labs(title=names[i],y = NULL, x = NULL, fill = NULL) +
+  geom_bar(stat = "identity",fill=colors[i]) +
+  coord_flip() +
+  guides(fill=FALSE) +
+  theme_bw() + theme(strip.background  = element_blank(),
+                     panel.grid.major = element_line(colour = "grey80"),
+                     panel.border = element_blank(),
+                     axis.ticks = element_line(size = 0),
+                     panel.grid.minor.y = element_blank(),
+                     panel.grid.major.y = element_blank(),
+                     plot.title = element_text(size=7)) +
+  theme(legend.position="bottom") 
+
+  plist[[names[i]]] = p1
+}
+
+library(gridExtra)
+do.call("grid.arrange", c(plist, ncol=4))
+```
+
+-------------------------------------------------------------------------------------------------------------------
+
+# Article 3: Comparing strengths and weaknesses of NLP techniques
+
+## raining Word Embedding models and visualize results
+In a sequence of articles we compare different NLP techniques to show you how we get valuable information from unstructured text. About a year ago we gathered reviews on Dutch restaurants. We were wondering whether 'the wisdom of the croud' - reviews from restaurant visitors - could be used to predict which restaurants are most likely to receive a new Michelin-star. Read this post to see how that worked out. We used topic modeling as our primary tool to extract information from the review texts and combined that with predictive modeling techniques to end up with our predictions.
+
+We got a lot of attention with our predictions and also questions about how we did the text analysis part. To answer these questions, we explain our approach in more detail in a series of articles on NLP. We didn't stop exploring NLP techniques after our publication, and we also like to share insights from adding more novel NLP techniques. More specifically we will use two types of word embeddings - a classic Word2Vec model and a GLoVe embedding model - we'll use transfer learning with pretrained word embeddings and we use BERT. We compare the added value of these advanced NLP techniques to our baseline topic model on the same dataset. By showing what we did and how we did it, we hope to guide others that are keen to use textual data for their own data science endeavours.
+
+In our previous article we used topic-modeling as our primary tool to extract information from the review texts. In an upcoming article we will combine those topic modeling outcomes with predictive modeling techniques to end up with our predictions.
+
+In this article we introduce Word Embedding and show you how a classic Word2Vec model is trained, how a GloVe model is trained, how to interprete results and finally visualise word embedding results.
+
+## Word embeddings: what is it?
+In short: word embeddings are vector representations of a particular word. Word embeddings are a representation of text where words that have the same meaning have a similar representation. It is used to capture something about the meaning of words you have available, in our case restaurant reviews, in a dense representation. The result is a coordinate system where related words are placed closer together. We are going to use two different word embedding techniques on data we gathered on restaurant reviews.
+
+This image, taken from the excellent blogs by J. Alammar The Illustrated Word2vec, provides some guidance. Below in the colored rows are 50 word embedding dimensions trained on Wikipedia data. Every word has it's own unique encoding. The first 7 words are all human-based, their dimensions look alike and have similar colors in this illustration. On the bottom you see the encoding for water which is quite different. Of course we do not know the exact meaning of each dimension, but you might see a dimension that could encode for youth based on the similarity for boy and girl. Or a dimension that encodes for royalty with similarities for queen and king.
+
+Sources:
+Efficient Estimation of Word Representations in Vector Space by Tomas Mikolov
+The illustrated word2vec by Jay Jalammar
+Word2Vec Tutorial - The Skip-Gram Model by Chris McCormick
+
+## Setting up our context
+In this blog we will construct Deep Learning models using the Keras framework. For an excellent introduction on building these models read Deep Learning with R written by François Chollet and and J. J. Allaire. Below we enable our workbook with the required packages and data to build our word embedding models and visualise results. In our blog on preparing the textual data we already briefly introduced tidyverse and tidytext. Here, we add a few other packages to the list:
+
+text2vec a very memory efficient package used for text analysis. We use is here for the native GloVe support to build our model;
+keras a popular package for building neural networks, a user friendly interface connected to the Tensorflow back-end;
+uwot is the R implementation of UMAP, a general purpose dimensionality reduction algorithm which is useful here to visualise the word embeddings.
+Cells and output of loading these packages are hidden by default.
+
+```{r}
+# Loading packages 
+library(text2vec)
+library(tidyverse)
+library(tidytext)
+library(keras)
+library(uwot)
+```
+
+```{python}
+%py 
+import tensorflow as tf
+from keras import utils
+```
+
+## Load preprocessed data
+Before we start building a word embedding we need some prepared textual data. Proper data preparation takes most of your time and is very decisive for the quality of the analysis results you end up with. In a previous blog, we explain in detail how we preprocessed the data. We will use the following 4 files for our word embeddings:
+
+reviews.csv: a csv file with review texts - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review)
+labels.csv: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+restoid.csv: a csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+trainids.csv: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)
+These files with the cleaned and relevant data for NLP techniques are made available to you via public blob storage. Learning by doing works best for most of us, so with the data available you are able to run all code we present yourself and see how things work out in more detail.
+
+```{r}
+# Read data files from public blob storage
+    
+# **reviews.csv**: a csv file with review texts - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review) 
+reviews <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/reviews.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **labels.csv**: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+labels <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/labels.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **restoid.csv**: a csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+restoids <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/restoid.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **trainids.csv**: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)storage_download(cont, "blogfiles/labels.csv",overwrite =TRUE)
+trainids <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/trainids.csv',header=TRUE,stringsAsFactors=FALSE)
+```
+
+```{r}
+Using a Word2Vec word embedding
+In general there are two ways to obtain a word embedding. First you can learn the word embeddings yourself together with the challenge at hand: modeling which restaurant receives a Michelin star. In one model you both train the word embeddings as well as the parameters for the predictive model. You start with random word vectors and then learn the best fitting word vectors, guided by the predictive task at hand. Word embeddings are often trained using a Neural Network architecture. We will explain how this works in the next section. Another option is to use an already trained set of word embeddings from a different task, so-called pretrained word embeddings. There are many pretrained models available for a variety of languages. However, these models are usually trained on general datasets such as Wikipedia, the Google Books index or Social Media posts.
+
+In this example we will train our own word embedding model for Dutch restaurant reviews. The result should reflect the semantic relationships between the words in this specific case. Whether we are succesful at achieving proper word embeddings can be assessed by reviewing the geometrical distance between word vectors. You would expect that word that are similar, i.e. "frog" and "water", have a smaller geometric distance than words that are not so similar in human language, i.e. "laptop" and "strawberry". Further, the real value of the embeddings will show using downstream tasks where we use the knowledge gained on word embedding in predicting which restaurant is likely to receive a next Michelin star. This is something we will do in a forthcoming article, here we focus on the embeddings themselves.
+
+Let's see what is in our cleaned review text and decide how many words we are going to allow into the neural network for each review. Remember than we did a lot of cleaning already: lower case setting, remove punctuation, stopwords and reviews with a low word count. As you can see below many reviews are shorter than 50 words. Based on this graph we decide to cut the number of allowed words at 150.
+```
+
+```{r}
+# Make sure the ggplot is not all over the place
+options(repr.plot.width=1000, repr.plot.height=600)
+
+```
+
+```{r}
+## divide reviewtext into separate words
+reviews_tokens <- reviews %>% 
+    select(restoReviewId, reviewTextClean) %>%
+    unnest_tokens(word, reviewTextClean)
+
+## count the number of words per review and plot results
+reviews_tokens %>% 
+  group_by(restoReviewId) %>% summarise(n_tokens = n()) %>% mutate(n_tokens_binned = cut(n_tokens, breaks = c(0,seq(10,300,10),Inf))) %>% 
+  group_by(n_tokens_binned) %>% summarise(n_reviews = n()) %>% 
+  ggplot(aes(x=n_tokens_binned,y=n_reviews)) + geom_bar(stat='identity',fill='green') + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust=1)) + geom_text(size=2, aes(label=n_reviews), position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+In the topic modeling blog we already showed that many words in de review corpus appear only once or twice. These words are unlikely to have a strong relation with other word in the review for embedding purposes. In the build-up of our neural network we will only use words that have a frequency of 5 or more in total. With the current collection that comes down to 37.520 unique words.
+
+```{r}
+reviews_tokens %>% 
+  group_by(word) %>% summarize(word_freq=n()) %>% 
+  mutate(min_5_freq = case_when(word_freq<5~'token frequency: <5',TRUE~'token frequency: >=5')) %>% 
+  group_by(min_5_freq) %>% summarise(n_tokens = n()) %>% mutate(pct_tokens = n_tokens / sum(n_tokens)) 
+```
+
+We remove all words from the cleaned review text so they appear at least 5 times in the entire corpus. After doing so we shape the tokens back to its original form.
+
+```{r}
+# remove words with a freq lower than 5 from the corpus and shape it back to a data frame as input for Keras
+reviews_new <- reviews_tokens %>% 
+                group_by(word) %>% 
+                mutate(token_freq=n()) %>%  
+                filter(token_freq>=5) %>% 
+                group_by(restoReviewId) %>% 
+                summarise(reviewTextClean = str_c(word, collapse = " "))
+```
+
+Before we go any further we will split our files into train and test datasets. This way we ensure not only that we avoid overfitting but also that results are comparable with other models on the same data. All the models we build in this blog series use the same train and test IDs.
+
+```{r}
+# split reviews and labels into train and test
+x_train <- trainids %>% left_join(y=reviews_new, by= "restoReviewId", match = "all") %>% filter(train == 1) %>% select(reviewTextClean) %>% pull()
+x_test <- trainids %>% left_join(y=reviews_new, by= "restoReviewId", match = "all") %>% filter(train == 0) %>% select(reviewTextClean) %>% pull()
+y_train <- trainids %>% left_join(y=labels, by= "restoReviewId", match = "all") %>% filter(train == 1) %>% select(ind_michelin) %>% pull() %>% as.array()
+y_test <- trainids %>% left_join(y=labels, by= "restoReviewId", match = "all") %>% filter(train == 0) %>% select(ind_michelin) %>% pull() %>% as.array()
+
+# count % of michelin restaurants in both train and test reviews 
+cat(paste0('Number of Michelin restaurants in train reviews: ',sum(y_train),' (',scales::percent(sum(y_train)/nrow(labels),accuracy=0.1),' of reviews)','\n'))
+cat(paste0('Number of Michelin restaurants in test reviews: ',sum(y_test),' (',scales::percent(sum(y_test)/nrow(labels),accuracy=0.1),' of reviews)'))
+```
+
+## Neural networks 101
+Let's talk about neural networks, they are an important ingredient for word embeddings. The basics:
+
+A neural network consist of layers; combined these layers form the neural network
+The network has input data (x) and output data or targets (y)
+Between the input and the output layer, there can be one or more hidden layers of connected nodes. The architecture of the model can be simple to complex, depending on the number of hidden layers, nodes and connections between nodes.
+Within the network a loss function is calculated: the difference between the predicted target and the actual target. The loss function is used as a feedback signal for learning.
+Lastly, the network has a optimizer which determines how the network will be updated (the weights get a new value) based upon the value of the loss function.
+
+This figure, taken from the excellent work of François Chollet and and J. J. Allaire Deep Learning with R, says it all.
+
+When we want to use a neural network to train word embeddings on our restaurant review data, we need to convert the tokens into integers so that the neural network can take the data as an input; you cannot feed text directly into a neural network. In neural network terms we need a 2 dimensional tensor with reviews (samples) and word vectors (features). Remember that this requires the input features to be of the same length. Below we will vectorize our text, create an index and use padding (add zeros) to create equal sizes.
+
+```{r}
+# maximum number of words for a review
+max_length <- 150
+
+# Vectorize the tokens, each token will receive a unique integer, the index of that token in a dictionary. Remember, we already restricted the corpus to 37.520 unique words.
+tokenizer_train <- text_tokenizer() %>% fit_text_tokenizer(x_train)
+tokenizer_test <- text_tokenizer() %>% fit_text_tokenizer(x_test)
+
+# and put these integers into a sequence
+sequences_train <- texts_to_sequences(tokenizer_train, x_train)
+sequences_test <- texts_to_sequences(tokenizer_train, x_test)
+
+# and make sure that every sequence has the same length (Keras requirement)
+input_train <- pad_sequences(sequences_train, maxlen = max_length)
+input_test <- pad_sequences(sequences_test, maxlen = max_length)
+
+# show an example from the created index (word and vector)
+tokenizer_train$word_index[200:204]
+```
+
+Now we have transformed our review text into integers, put them into the review sequence and added zero's for empty spaces in the tensor. Let us check what the original data for one review (number 1001) looks like compared to the mapping to integers made by the Keras tokenizer. If all went well every original word has been replaced by a unique integer. These integers (which can be mapped back to words) will be input for our neural network.
+
+```{r}
+cat(paste0('Original text of review number 1001 without interpunction, low frequency words and stopwords:', '\n' ,x_train[1001],'\n\n'))
+cat(paste0('What this review looks like converted to integers:'),'\n', (input_train[1001,]),'\n\n')
+cat(paste0('Mapping back the first word of review 1001 using the dictionary index:', '\n'))
+
+# Let us check whether the first non-zero integers map back to the right words: 
+print(tokenizer_train$word_index[495])
+print(tokenizer_train$word_index[3307])
+```
+
+Next we build the structure of our neural network. In general word embeddings may have 100, 300 or even more dimensions, depending on the size of the vocabulary. Here we keep things simple and use 32 dimensions for our model. This is an arbitrary number, I like to think in terms of bits. The word embedding is trained using a Keras embedding layer. It will start with random weights and update itself based upon the loss function and optimizer. The layer_embedding needs the size of the input (the number of unique tokens + 1), the output dimension (32 word embedding dimensions) and can also deal with a maximum review length (150 words).
+
+```{r}
+# how many dimensions do we want our word2vec embedding to have
+word2vecdim <- 32
+
+# how many words are in the index
+num_tokens <- length(unique(tokenizer_train$word_index))
+
+model <- keras_model_sequential() %>% 
+  # Specify the maximum input length (150) and input_dim (unique tokens+1) and choose 32 dimensions
+  layer_embedding(input_dim = num_tokens+1, 
+                  output_dim = word2vecdim, 
+                  input_length = max_length,
+                  mask_zero = TRUE,                 
+                 ) %>% 
+  # We flatten the 3D tensor of embeddings into a 2D tensor of shape `(samples, max_length * word2vecdim)`
+  layer_flatten() %>% 
+  # add a dense layer with 32 units
+  layer_dense(units = 32, activation = "relu") %>%
+  # add the classifier on top
+  layer_dense(units = 1, activation = "sigmoid") 
+
+model %>% compile(
+  optimizer = "rmsprop",
+  # we have a binary classification, a single unit sigmoid in the dense layer so binary_crossentropy 
+  loss = "binary_crossentropy",
+  # retrieve accuracy as measure
+  metrics = c("acc")
+)
+
+history <- model %>% fit(
+  input_train, y_train,
+  # maximum number of iterations
+  epochs = 20,
+  # how many reviews do we offer in each batch
+  batch_size = 500,
+  # check train results againts test data
+  validation_data = list(input_test, y_test)
+)
+```
+
+```{r}
+plot(history)
+```
+
+The plot might show us why it is so important to use a train and test set to avoid overfitting. After about 10 epochs the performance in the validation set is stabilizing and no improvement is recorded in the validation set. We extract the weights of the model to look at our 32 embedding dimensions. Below you will see the dimension for word number 495 / aanraden.
+
+```{r}
+# get embedding matrix, the weights from the model
+word2vec_embedding <- get_weights(model)[[1]]
+
+# give the index back the name of the word for looking up a word embedding (NA for blanks)
+rownames(word2vec_embedding) <- c('NA',as.vector(unlist(tokenizer_train$index_word)))
+
+# let's look up word 495 ("aanraden") again, the index shifted with 1 as NAs are now on top of the list 
+print(rownames(word2vec_embedding)[496])
+word2vec_embedding[495,]
+```
+
+As every word has these 32 dimensions we can now calculate the L2 distance between words and find out which words are close to pasta and bier ('beer'). As you can see pizza is very close to pasta but also groente ('vegetable'), kaas ('cheese') and warm. That pasta and pizza are similar words is no surpise. But apparently reviewers also mention a pasta with rijst ( 'rice') involved.
+
+As for the word bier ('beer') we see words like huiswijn ('housewine'), fruit but also words as vraag ('question') and tafeltjes ('tables'). Yes, these are words you might expect to be similar. Yet, I'm not blown away by these results. In the next section we will use an alternative and build a GloVe embedding model to see how that works out.
+
+```{r}
+# find words that are related to another word 
+token <- "pasta"
+embedding_vector <- t(matrix(word2vec_embedding[token,])) 
+cos_sim = sim2(x = word2vec_embedding, y = embedding_vector, method = "cosine", norm = "l2")
+cat(paste0('Words from the embedding layer similar to "pasta":', '\n'))
+print(head(sort(cos_sim[,1], decreasing = TRUE), 10))
+
+token <- "bier"
+embedding_vector <- t(matrix(word2vec_embedding[token,])) 
+cos_sim = sim2(x = word2vec_embedding, y = embedding_vector, method = "cosine", norm = "l2")
+cat(paste0('\n', 'Words from the embedding layer similar to "bier":', '\n'))
+print(head(sort(cos_sim[,1], decreasing = TRUE), 10))
+```
+
+## Training a GloVe word embedding
+So at face value the results from Word2Vec were not mindblowing. Some say that Word2Vec's training performs better when using larger vocabularies and hyper parameter tuning needs to be done to achieve the best results. There is an alternative on the block: Global Vectors for Word Representation. Like Word2vec, GloVe uses vector representations for words and the distance between words is related to semantic similarity. However, GloVe focuses on words co-occurrences over the entire corpus. Its embeddings relate to the probabilities that two words appear together. This is the case because GloVe is a count-based model where dimensionality reduction is done on the co-occurence of words that appear together. Word2Vec is using a probabilistic approach where a target word and context words are predicted (and optimized based on the loss function). Many favor a GloVe model over a classic Word2Vec model because of the fact that global information is better captured, it simply works better for many tasks. So let's find out how a GloVe model is working out for our restaurant reviews.
+
+We re-use our reviews_new dataset, which is already cleaned, as input for text2vec. As you can see terms like restaurtant and eten ('food') are most common and time indications and numbers are rare.
+
+```{r}
+library(text2vec)
+
+# We need to tokenize our already tokenized set as input for text2vec, re-use cleaned text in reviews_new
+it <- itoken(reviews_new$reviewTextClean, 
+                   tokenizer = word_tokenizer,
+                   ids = reviews_new$restoReviewId,
+                   progressbar = TRUE)
+
+# create a vocabulary out of the tokenset (stopword removal and bi-grams are optional)
+vocab <- create_vocabulary(it) # use uni-grams
+
+# text2vec has the option to prune the vocabulary of low-frequent words
+vocab <- prune_vocabulary(vocab, term_count_min = 5)
+
+# What's in the vocabulary?
+print(vocab)
+```
+
+Next we vectorize our input tokens and create a Term-Count-Matrix for GloVe to handle. We create a matrix for the word embeddings (glove_model) and execute the glove command from the text2vec package that will create the embedding matrix with (again) 32 dimension. The GloVemodel learns two sets of word vectors: main and context. Best practice is to combine both the main word vectors and the context word vectors into one matrix.
+
+```{r}
+# Vectorize word to integers
+vectorizer <- vocab_vectorizer(vocab)
+
+# Create a Term-Count-Matrix, by default it will use a skipgram window of 5 (symmetrical)
+tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
+
+# maximum number of co-occurrences to use in the weighting function, we choose the entire token set divided by 100
+x_max <- length(vocab$doc_count)/100
+
+# set up the embedding matrix and fit model
+glove_model <- GloVe$new(rank = 32, x_max = x_max) 
+glove_embedding = glove_model$fit_transform(tcm, n_iter = 20, convergence_tol = 0.01, n_threads = 4)
+
+# combine main embedding and context embeddings (sum) into one matrix
+glove_embedding = glove_embedding + t(glove_model$components) # the transpose of the context matrix
+```
+
+Let's find out how well GloVe is doing on our restaurant reviews. We pull up the same nearby words as we did earlier. These results look much better, a translation to English is not even required, everybody can see that pasta, spaghetti, lasagne, pizza and risotto are semantically very close. This also holds for bier ('beer'): tap, biertjes ('beers'), glas and alcoholvrij ('without alcohol') . So based on this small comparison the GloVe word embedding does a far better job than a classic Words2Vec model on our corpus. However, these results are at this point no indication that GloVe will perform better in downstream predictions tasks. To show you results of our efforts in more detail side by side we will visualize the embeddings in the next section.
+
+```{r}
+word <- glove_embedding["pasta", , drop = FALSE] # wat ligt er dicht bij 'lekker'
+cos_sim = sim2(x = glove_embedding, y = word, method = "cosine", norm = "l2")
+head(sort(cos_sim[,1], decreasing = TRUE), 10)
+```
+
+```{r}
+word <- glove_embedding["bier", , drop = FALSE] 
+cos_sim = sim2(x = glove_embedding, y = word, method = "cosine", norm = "l2")
+head(sort(cos_sim[,1], decreasing = TRUE), 10)
+```
+
+## Visualisation
+Up till now we've been looking at code, matrices en characters to see how both techniques are doing. In this section we will visualise the results of both techniques. Viewing 32 dimensions is impossible, so we need some form of data reduction. We need a method that is both fast en suitable for high dimensionality reduction. UMAP is the technique we are going to be using here, mainly because it is fast and has the ability to balance between local and global proximity very well. Another candidate for dimension reduction would be t-SNE, an excellent blog on the differences between t-SNE and UMAP can be found here.
+
+UMAP has a lot of parameters you can play around with, the most important are n_neighbors and min_dist. As you might have read in the above blog a first thing that UMAP does is to create a high dimensional map, and the number of neigbors connected to a single point determine what that map looks like. The initial state of the map will have a focus on local detailed connections with a low value for n_neighbors and a more global big picture with a higher value of n_neighbors. Second the min_dist parameter will determine how many space you allow between points. A low value will result in close clusters at a local level, a high value will yield a more loosely connected picture.
+
+We reduce our number of embedding dimensions (32) to just 2 so we can visualize results easily using an X and Y plot. Using 3 dimensions would also be nice, but ggplot does not allow for a 3D render in this notebook.
+
+```{r}
+# Word2Vec dimension reduction
+word2vec_umap <- umap(word2vec_embedding, n_components = 2, metric = "cosine", n_neighbors = 25, min_dist = 0.1, spread=2)
+
+# GloVe dimension reduction
+glove_umap <- umap(glove_embedding, n_components = 2, metric = "cosine", n_neighbors = 25, min_dist = 0.1, spread=2)
+
+# Dimensions of end result
+dim(glove_umap)
+```
+
+We did a few iterations to find out which UMAP parameter settings gave the best results. Now for both Word2Vec and GloVe embeddings we have reduced the number of dimensions to 2. Below we attach the words that belong to rows and we create a dataframe as input for ggplot.
+
+```{r}
+# Put results in a dataframe for ggplot, starting with Word2Vec
+df_word2vec_umap <- as.data.frame(word2vec_umap, stringsAsFactors = FALSE)
+
+# Add the labels of the words to the dataframe
+df_word2vec_umap$word <- rownames(word2vec_embedding)
+colnames(df_word2vec_umap) <- c("UMAP1", "UMAP2", "word")
+df_word2vec_umap$technique <- 'Word2Vec'
+cat(paste0('Our Word2Vec embedding reduced to 2 dimensions:', '\n'))
+str(df_word2vec_umap)
+
+# Do the same for the GloVe embeddings
+df_glove_umap <- as.data.frame(glove_umap, stringsAsFactors = FALSE)
+
+# Add the labels of the words to the dataframe
+df_glove_umap$word <- rownames(glove_embedding)
+colnames(df_glove_umap) <- c("UMAP1", "UMAP2", "word")
+df_glove_umap$technique <- 'GloVe'
+cat(paste0('\n', 'Our GloVe embedding reduced to 2 dimensions:', '\n'))
+str(df_glove_umap)
+
+# Combine the datasets
+df_umap <- bind_rows(df_word2vec_umap, df_glove_umap)
+```
+
+On the left we see the dimension reduction for the GloVe model and on the right the Word2Vec image. There are clearly more distinct spaces between local clusters for the GloVe model, the Word2Vec model looks more dense.
+
+```{r}
+# Plot the UMAP dimensions for both Word2Vec and GloVe
+ggplot(df_umap) +
+      geom_point(aes(x = UMAP1, y = UMAP2), colour = 'blue', size = 0.05) +
+      facet_wrap(~technique) +
+      labs(title = "Word embedding in 2D using UMAP") +
+      theme(plot.title = element_text(hjust = .5, size = 14))
+```
+
+Let's zoom in on the GloVe embedding some more an plot labels for all the embedding points. On the bottom left we clearly have a spot for desert related words (brownies, citroentaart 'lemon cake', spekkoek 'layer cake'). On the top right we have things that went wrong (teruggestuurd 'sent back', lauw 'lukewarm', bevroren 'frozen') and on the middle left we have a spot for snacks (bitterballen 'bitterballs', mayonaise, kipnuggets, frikandellen 'meat balls'). These embeddings clearly show that with this technique we are able to cluster words together that have the same semantic meaning.
+
+```{r}
+# Plot the bottom part of the GloVe word embedding with labels
+ggplot(df_glove_umap[df_glove_umap$UMAP1 > 3.0 & df_glove_umap$UMAP1 < 3.8 & df_glove_umap$UMAP2 > 4.6,]) +
+      geom_point(aes(x = UMAP1, y = UMAP2), colour = 'blue', size = 2) +
+      geom_text(aes(UMAP1, UMAP2, label = word), size = 2.5, vjust=-1, hjust=0) +
+      labs(title = "GloVe word embedding in 2D using UMAP - partial view") +
+      theme(plot.title = element_text(hjust = .5, size = 14))
+```
+
+We can also take a single word from the index for both techniques and plot semantically close words to see differences between GloVe and Word2Vec. We choose for the word pesto as it has many ingredients, can be used in various dishes and not everybody likes the taste. First we gather words that are close (based on the L2 distance), save results in a dataframe and plot results. These plots are cristal clear, the GloVe model does a far better job in understand relationship between words in our restaurant reviews.
+
+```{r}
+# Plot the word embedding of words that are related for the GloVe model
+word <- glove_embedding["pesto", , drop = FALSE] 
+cos_sim = sim2(x = glove_embedding, y = word, method = "cosine", norm = "l2")
+select <- data.frame(rownames(as.data.frame(head(sort(cos_sim[,1], decreasing = TRUE), 25))))
+colnames(select) <- "word"
+selected_words <- df_glove_umap %>% inner_join(y=select, by= "word", match = "all") 
+
+#The ggplot visual for Word2Vec
+pesto_glove <- ggplot(selected_words, aes(x = UMAP1, y = UMAP2, colour = word == 'pesto')) + 
+      geom_point(show.legend = FALSE) + 
+      scale_color_manual(values = c('black', 'red')) +
+      geom_text(aes(UMAP1, UMAP2, label = word), show.legend = FALSE, size = 2.5, vjust=-1.5, hjust=0) +
+      labs(title = "GloVe word embedding of words related to 'pesto'") +
+      theme(plot.title = element_text(hjust = .5, size = 14))
+
+# And so the same for the Word2Vec model
+token <- "pesto"
+embedding_vector <- t(matrix(word2vec_embedding[token,])) 
+cos_sim = sim2(x = word2vec_embedding, y = embedding_vector, method = "cosine", norm = "l2")
+select <- data.frame(rownames(as.data.frame(head(sort(cos_sim[,1], decreasing = TRUE), 25))))
+colnames(select) <- "word"
+selected_words <- df_word2vec_umap %>% inner_join(y=select, by= "word", match = "all") 
+
+# The ggplot visual for GloVe
+pesto_word2vec <- ggplot(selected_words, aes(x = UMAP1, y = UMAP2, colour = word == 'pesto')) + 
+      geom_point(show.legend = FALSE) + 
+      scale_color_manual(values = c('black', 'red')) +
+      geom_text(aes(UMAP1, UMAP2, label = word), show.legend = FALSE, size = 2.5, vjust=-1.5, hjust=0) +
+      labs(title = "Word2Vec word embedding of words related to 'pesto'") +
+      theme(plot.title = element_text(hjust = .5, size = 14))
+
+library(gridExtra)
+
+# Put the results side-by-side for a comparison
+grid.arrange(pesto_glove,pesto_word2vec, ncol=2)
+```
+
+## Word embedding - wrapping it up
+In this article we have explained what word embedding is and showed you how you can train your own embedding model using two different techniques. We used real world data of restaurant reviews which turned out very well for the GloVe model and not so well for the Word2Vec model. Building these embedding models required quite some decision making in order to find 'the best' model. Of course you can always avoid making all these decisions and use a pre-trained model as input for your analyses. More on the usage of pre-trained embedding models in an upcoming article.
+
+Now that we have a well trained GloVe word embedding model, how are we going to leverage the knowledge we gained? In a next article we will compare performances for predicting which restaurant is likely to receive a next Michelin star using NLP techniques. Next to the reviewers text left behind after a restaurant visit we also have some other features about the review to predict whether the review is a Michelin review or not. We will combine the knowledge gained from the word embedding and enrich the dataset with these additional features for our predictions.
+
+--------------------------------------------------------------------------------------------------------------------
+
+# Article 4: Comparing strengths and weaknesses of NLP techniques
+
+## Using Topic Modeling Results to predict Michelin Stars
+In a sequence of articles we compare different NLP techniques to show you how we get valuable information from unstructured text. About a year ago we gathered reviews on Dutch restaurants. We were wondering whether 'the wisdom of the croud' - reviews from restaurant visitors - could be used to predict which restaurants are most likely to receive a new Michelin-star. Read this post to see how that worked out. We used topic modeling as our primary tool to extract information from the review texts and combined that with predictive modeling techniques to end up with our predictions.
+
+We got a lot of attention with our predictions and also questions about how we did the text analysis part. To answer these questions, we explain our approach in more detail in a series of articles on NLP. But we didn't stop exploring NLP techniques after our publication, and we also like to share insights from adding more novel NLP techniques. More specifically we will use two types of word embeddings - a classic Word2Vec model and a GLoVe embedding model - we'll use transfer learning with pretrained word embeddings and we use BERT. We compare the added value of these advanced NLP techniques to our baseline topic model on the same dataset. By showing what we did and how we did it, we hope to guide others that are keen to use textual data for their own data science endeavours.
+
+In a previous article, we introduced Topic Modeling and showed you how to identify topics and visualise topic model results. In this article, we use the results from our Topic Model to predict Michelin Restaurants.
+
+## Step 0: Setting up our context
+First, we set up our workbook environment with the required packages to predict Michelin stars based on the topic model we've created.
+
+In our blog on preparing the textual data we already briefly introduced tidyverse and tidytext. Here, we add a few other packages to the list:
+
+topicmodels is a package to estimate topic models with LDA and builds upon data structures created with the tm package
+randomForest package is used to train our predictive model.
+modelplotr is used to visualise the performance of the model and to compare models
+
+```{r}
+# Loading packages 
+library(randomForest)
+library(tidyverse)
+library(tidytext)
+library(topicmodels)
+library(modelplotr)
+```
+
+## Step 1. Load prepared data and trained topic model
+In this blog, we build further on what we did in two previous blogs and we start by loading the results from that. In the datapreparation blog, we explain in detail how we preprocessed the data, resulting in the following 5 files we can use in our NLP analytics:
+
+
+reviews.csv: a csv file with original and prepared review texts - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review)
+labels.csv: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+restoid.csv: a csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+trainids.csv: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)
+features.csv: a csv file with other features regarding the reviews (included key: restoreviewid)
+In the topic modeling blog we show in detail how we ended up with our 7 topics, which we want to use as features in predicting Michelin stars. This file is named:
+
+lda_fit_def.RDS: an R object with the chosen topic model with 7 topics
+Both the preprocessed data files and the topic model file are made available to you via public blob storage so that we can load them here and you can run all code we present yourself and see how things work in more detail.
+
+```{r}
+# **reviews.csv**: a csv file with review texts - the fuel for our NLP analyses. (included key: restoreviewid, hence the unique identifier for a review) 
+reviews <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/reviews.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **labels.csv**: a csv file with 1 / 0 values, indicating whether the review is a review for a Michelin restaurant or not (included key: restoreviewid)
+labels <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/labels.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **restoid.csv**: a csv file with restaurant id's, to be able to determine which reviews belong to which restaurant (included key: restoreviewid)
+restoids <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/restoid.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **trainids.csv**: a csv file with 1 / 0 values, indicating whether the review should be used for training or testing - we already split the reviews in train/test to enable reuse of the same samples for fair comparisons between techniques (included key: restoreviewid)storage_download(cont, "blogfiles/labels.csv",overwrite =TRUE)
+trainids <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/trainids.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **features.csv**: a csv file with other features regarding the reviews (included key: restoreviewid)
+features <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/features.csv',header=TRUE,stringsAsFactors=FALSE)
+
+# **lda_fit_def.RDS**: an R object with the chosen topic model with 7 topics
+lda_fit_def <- readRDS(url('https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/lda_fit_def.RDS','rb'))
+```
+
+## Step 2. Generate topic probabilities per review
+The reviews data contains the cleaned text and the bigrams in separate fields. We need to combine the cleaned text and bigrams and then tokenize the data - creating a dataframe with per record the review-token-combinations. Next, we can add the topic model weights to these tokens. Those weights are saved in the lda_fit_def topic model object.
+
+To add the topic weigths to the tokens, we first need to create a dataframe that shows per token to what extent that token is associated with each topic - a higher beta means the token is more related to that topic. Creating this dataframe from the loaded topic model can easily be done using the tidytext function tidy(). As an example, below we show the topic betas for the tokens gasten (en: guests) and wijn (en: wine), whereas the token gasten has no strong associations with specific topics, the token wijn is mainly associated with topic 3.
+
+```{r}
+# get topic-term beta (weight of term within topic) 
+topics <- tidy(lda_fit_def)
+
+# let's see the token weights per tpoic for the token 'wijn' (EN: wine)  
+topics %>% filter(term %in% c('gasten','wijn')) %>% mutate_if(is.numeric, round, 5)
+```
+
+Using the topic weights, we can determine to what extent each review contains tokens that are related to the 7 topics. Next, by summing all the topic weights over all the tokens in a review, and then dividing those scores by the summed weights over all topics, we get a topic probability for each topic for each review. After transposing those topic probabilities to columns, this is the input we need for our predictive model.
+
+```{r}
+# get reviews, prepare the tokens, and add topic betas to tokens and aggregate to get topic probabilities per review
+reviews_topicprobs <- reviews %>% 
+  # combine prepared text including bigrams
+  mutate(prepared_text = paste(reviewTextClean,bigrams)) %>% select(restoReviewId,prepared_text) %>% 
+  # unnest tokens
+  unnest_tokens(token, prepared_text) %>% 
+  # add token betas
+  left_join(topics,by=c("token"="term")) %>% 
+  # aggregate over betas
+  group_by(restoReviewId, topic) %>% summarise(beta_topic = sum(beta,na.rm=T)) %>% 
+  # reset beta_topic to sum to 1 over al topics
+  group_by(restoReviewId) %>% mutate(prob_topic = beta_topic / sum(beta_topic,na.rm=T)) %>% select(-beta_topic) %>%  ungroup() %>% 
+  # transpose (topic probabilities in columns) , remove irrelevant column and 1 observation with NA topic scores
+  pivot_wider(names_from = topic, values_from = prob_topic,names_prefix='prob_topic') %>% select(-prob_topicNA) %>% filter(!is.na(prob_topic1))
+
+# show some records
+head(reviews_topicprobs)
+```
+
+Finally, let's add the labels we gave to the topics and plot the probabilities for a sample of 50 reviews:
+
+```{r}
+# topic labels 
+topiclabels <- c('Hospitality','Tastes & Courses','Culinary Experience & Wines','Atmosphere','Price/Quality','Plate details','Waiter & Waitress')
+topiclabels <- data.frame(topic=paste0('topic',seq(1,7)),topic.label=factor(topiclabels,levels=topiclabels))
+
+# show distribution over topics for sample of reviews 
+reviews_topicprobs %>% sample_n(50) %>% pivot_longer(-restoReviewId,names_to='topic',values_to='probability')%>% mutate(topic=str_replace(topic,'prob_','')) %>% 
+  inner_join(topiclabels,by='topic') %>% 
+  ggplot(aes(x=restoReviewId,y=probability)) + geom_bar(aes(fill=topic.label),stat='identity') + coord_flip() +  
+    ggtitle('Topic probability distribution per review') + theme_minimal()  +
+    theme(legend.position="right",legend.text = element_text(size=6),legend.title=element_blank(),plot.title = element_text(hjust = 0.5,size=12),
+          axis.title = element_text(size=8),axis.text = element_text(size=8)) + scale_fill_brewer(palette = "Paired")
+```
+
+We can see, the distribution over topics is very different for different reviews. With our predictive model, we want to distinguish Michelin versus non-Michelin reviews. Do we see a difference looking at the topic probability distributions for Michelin versus non-Michelin reviews?
+
+```{r}
+reviews_topicprobs %>% 
+  # rearrange: topic probabilities to rows
+  pivot_longer(-restoReviewId,names_to='topic',values_to='probability')%>% mutate(topic=str_replace(topic,'prob_','')) %>% 
+  # add topic labels and add prediction labels
+  inner_join(topiclabels,by='topic') %>% inner_join(labels,by='restoReviewId') %>% mutate(ReviewType=as.factor(case_when(ind_michelin==1~'Michelin',TRUE~'non-Michelin'))) %>%
+  # create density plots per topic for Michelin and non-Michelin reviews
+  ggplot(aes(x=probability,group=ReviewType,fill=ReviewType)) + geom_density(alpha=0.6) + facet_wrap(~topic.label,ncol = 4) +   
+    ggtitle('Topic probability distribution for Michelin / non-Michelin reviews') + theme_minimal()  +
+    theme(legend.position=c(0.9, 0.2),legend.text = element_text(size=8),legend.title=element_blank(),plot.title = element_text(hjust = 0.5,size=12),
+          axis.title = element_text(size=8),axis.text = element_blank()) + ylim(c(0,20))
+```
+
+## Step 3. Prepare data for predictive model
+Now that we have the topic probabilities per review, we need to do some last preparations before we can estimate a predictive model predicting Michelin reviews:
+
+add label indicating Michelin/not-Michelin to reviews
+split in train/test set reusing previously defined train/test ids
+
+```{r}
+# prepare data voor training and testing
+
+modelinput <- reviews_topicprobs %>% 
+  # add label and train set indicator
+  inner_join(labels,by="restoReviewId") %>% inner_join(trainids,by="restoReviewId")  %>%
+  # set label to factor
+  mutate(ind_michelin=as.factor(ind_michelin))
+  
+train <- modelinput %>% filter(train==1) %>% select(-train)
+test <- modelinput %>% filter(train!=1) %>% select(-train)
+
+#print some rows for train
+print(sample_n(train,5),width = 100)
+```
+
+## Step 4. Predict Michelin Reviews using only topic probabilities
+The train and test data contains both the labels and the topic probabilities, so we can estimate and validate a predictive model. Here, we will use a random forest model since it is fast and can easily be used with all sorts of features (we add other features in a bit).
+
+```{r}
+#prepare model formula
+feat_topics <- c('prob_topic1','prob_topic2','prob_topic3','prob_topic4','prob_topic5','prob_topic6','prob_topic7')
+formula <- as.formula(paste('ind_michelin', paste(feat_topics, collapse=" + "), sep=" ~ "))
+
+# estimate model (after some parameter tuning)
+rf.topicscores <- randomForest(formula, data=train,ntree=500,mtry=4,min_n=50)
+```
+
+## Feature importance: What topics help best in predicting Michelin?
+Before we have a look at how good we are in predicting Michelin reviews solely based on the identified topics, let's have a look at what are the most important topics in predicting Michelin reviews:
+
+```{r}
+# get importance and add label
+
+topiclabels <- data.frame(feature=paste0('prob_topic',seq(1,7)),
+                          topic_label=c('Hospitality','Tastes & Courses','Culinary Experience & Wines','Atmosphere',
+                                  'Price/Quality','Plate details','Waiter & Waitress'))
+
+importance(rf.topicscores) %>% data.frame() %>% mutate(feature=row.names(.)) %>% rename(importance=MeanDecreaseGini) %>%
+  inner_join(topiclabels,by='feature') %>% select(topic_label,importance) %>% arrange(-importance)
+```
+
+The feature importance shows that, as we expected when creating the topics as well as from our previous density plots, the topic 'Culinary Experience & Wines' is the most important in distinguishing between Michelin and non-Michelin Reviews.
+
+## Predictive power: How good can we predict Michelin reviews based on topics only?
+Now that we know what topics matter in our prediction model, let's evaluate how good this model is in predicting Michelin reviews. We can have a look at different statistics en plots. Often, the confusion matrix and statistics derived from that are used, so let's start there:
+
+```{r}
+# get predicted and actual values for test data
+predicted <- predict(rf.topicscores,newdata=test, type="response")
+actual    <- test$ind_michelin
+
+# confusion matrix: actual vs predicted counts
+confmat   <- table(actual,predicted)
+print(confmat)
+
+# derive True Positive, False Positive, False Negative and True Negative from confusion matrix
+TP <- confmat[2,2]; FP <- confmat[1,2]; FN <- confmat[2,1]; TN <- confmat[1,1]
+
+#Accuracy: What % of all predictions are correct?
+Accuracy = (TP+TN)/(TP+FP+FN+TN)
+cat('\n Accuracy:   ', scales::percent(Accuracy),' of all Michelin/non-Michelin review predictions are correct')
+
+#Precision: What % of predicted Michelin reviews are actually Michelin reviews? 
+Precision = (TP)/(TP+FP)
+cat('\n Precision:  ', scales::percent(Precision),' of predicted Michelin reviews are actually Michelin reviews')
+
+#Recall (also known as Sensitivity): What % of all actual Michelin reviews are predicted as such? 
+Recall = (TP)/(TP+FN)
+cat('\n Recall:     ', scales::percent(Recall),' of all actual Michelin reviews are predicted as such')
+
+#F1.Score = weighted average of Precision and Recall
+F1.Score = 2*(Recall * Precision) / (Recall + Precision)
+cat('\n F1 score:  ', round(F1.Score,2),' is the weighted average of Precision and Recall')
+```
+
+From the statistics above we can already conclude that, based on solely the topic probabilities, we are able to predict Michelin reviews quite good! The accuracy is very high, but this was to be expected, since only 3% of all reviews are Michelin reviews; predicting 100% as non-Michelin would also result in a 97% accuracy. This is however not the case since the model does predict 176 reviews to be Michelin reviews. The precision is 93%, hence of all the predicted Michelin reviews, 93% are in fact Michelin reviews. The recall seems somewhat low: 13% hence of all actual Michelin Reviews only 13% is predicted to be a Michelin review. Buth this might be due to the cutoff value used to translate the predicted probability into the prediction, by default the cutoff is a probability of 50%.
+
+To get more insights the quality and ways to use a predictive model, some additional plots are often very insightful. These plots are all based on the predicted probability instead of the 'hard' 1/0 prediction based on a cutoff value. Let's explore how well we can predict Michelin reviews with our model with only our topic scores as features with the package modelplotr:
+
+```{r}
+# prepare data for modelplotr plots
+scores_and_ntiles1 <- prepare_scores_and_ntiles(datasets=list("train","test"),
+                                               dataset_labels = list("train data","test data"),
+                                               models = list("rf.topicscores"),
+                                               model_labels = list("Random Forest - Topic Modeling"),
+                                               target_column="ind_michelin",
+                                               ntiles = 100)
+plot_input <- plotting_scope(prepared_input = scores_and_ntiles1,scope = 'no_comparison')
+
+# plot 4 modeplotr plots together
+plot_multiplot(data = plot_input)
+```
+
+For an introduction in these how these plots help to assess the (business) value of a predictive model, see ?modelplotr or read this. In short:
+
+Cumulative gains plot, helps answering the question: When we apply the model and select the best X ntiles, what percentage of the actual target class observations can we expect to target?
+Cumulative lift plot or index plot, helps you answer the question: When we apply the model and select the best X ntiles, how many times better is that than using no model at all?
+Response plot, plots the percentage of target class observations per ntile. It can be used to answer the following business question: When we apply the model and select ntile X, what is the expected percentage of target class observations in that ntile?
+Cumulative response plot, plots the cumulative percentage of target class observations up until that ntile. It helps answering the question: When we apply the model and select up until ntile X, what is the expected percentage of target class observations in the selection?
+From our Michelin prediction model based on the topic score features only, we see that the top 1% of all reviews with the highest probability, consist for more than 50% of actual Michelin reviews, where in total only about 3% of all reviews are Michelin reviews.
+
+Since these plots show in more detail how good predictive models are, we will show these plots again later on when we want to compare the quality of different Michelin prediction models. First, after adding other features and in later blogs when we use other NLP techniques to get most out of the textual review data in predicting Michelin reviews.
+
+## Extra: Evaluate predictions on the restaurant level (instead of the review level)
+You might question here: As your goal is to predict Michelin restaurants based on reviews, why are you looking at how good your predictions are at the review level? Good point, sport! :) We chose to build our predictive models on the review level and not on the restaurant level because we don't want to loose too much information. To build restaurant level models, we first would have to aggregate topic scores to the restaurant level, taking mean or max scores. Also, we would end up having a very limited number of observations to build models on. We can however evaluate to what extent the review-level models can be used to point out Michelin stars on the restaurant level. To do so, let's aggregate our review scores to the restaurant level and see how good we are then in distinguishing Michelin from non-Michelin restaurants based on what texts reviewers use in reviewing the restaurants. We'll use the average michelin probability over all available test reviews to come up with a restaurant Michelin probability.
+
+```{r}
+# prepare data
+resto_scores_and_ntiles_rf <- test %>%  
+   # the restaurant id is the first part of the restoReviewId, before the underscore
+   mutate(model_label= as.factor('random forest (topics only)'),
+           dataset_label = as.factor('test data'),
+           prob_0 = predict(newdata=.,object=rf.topicscores,type='prob')[,1],
+           prob_1 = predict(newdata=.,object=rf.topicscores,type='prob')[,2],
+           y_true=as.factor(ind_michelin),
+           restoId = str_extract(restoReviewId, "[^_]+")
+          ) %>% 
+   group_by(model_label,
+            dataset_label,
+            y_true,
+            restoId) %>%
+   summarise(prob_0=mean(prob_0),
+             prob_1=mean(prob_1)) %>% 
+    ungroup() %>%
+    arrange(-prob_0) %>%
+    mutate(ntl_0 = ntile(n=100),
+           ntl_1 = 101-ntl_0)
+
+# show some records
+resto_scores_and_ntiles_rf %>% sample_n(10)
+```
+
+```{r}
+# get predicted and actual values for test data
+predicted <- case_when(resto_scores_and_ntiles_rf$prob_1>=0.5~1,TRUE~0)
+actual    <- resto_scores_and_ntiles_rf$y_true
+
+# confusion matrix: actual vs predicted counts
+confmat   <- table(actual,predicted)
+print(confmat)
+
+# derive True Positive, False Positive, False Negative and True Negative from confusion matrix
+TP <- confmat[2,2]; FP <- confmat[1,2]; FN <- confmat[2,1]; TN <- confmat[1,1]
+
+#Accuracy: What % of all predictions are correct?
+Accuracy = (TP+TN)/(TP+FP+FN+TN)
+cat('\n Accuracy:   ', scales::percent(Accuracy),' of all Michelin/non-Michelin restaurant predictions are correct')
+
+#Precision: What % of predicted Michelin reviews are actually Michelin reviews? 
+Precision = (TP)/(TP+FP)
+cat('\n Precision:  ', scales::percent(Precision),' of predicted Michelin restaurants are actually Michelin restaurants')
+
+#Recall: What % of all actual Michelin reviews are predicted as such? 
+Recall = (TP)/(TP+FN)
+cat('\n Recall:     ', scales::percent(Recall),' of all actual Michelin reviews are predicted as such')
+
+#F1.Score = weighted average of Precision and Recall
+F1.Score = 2*(Recall * Precision) / (Recall + Precision)
+cat('\n F1 score:  ', round(F1.Score,2),' is the weighted average of Precision and Recall')
+```
+
+On the restaurant level, we can see that only 5 restaurants in the unseen test data have an average model probability over 50% and are therefore predicted as being a Michelin restaurant. However all of these 5 restaurants in fact are Michelin restaurants, hence our model based on topic model scores only has a Precision of 100%! There are in total 110 Michelin restaurants in our data though, hence recall (at a 50% cutoff) is only 5% and F1 Score is therefore low. Our modelplotr plots give more insights in the performance of our model on the restaurant level over the whole distribution of model probabilities:
+
+```{r}
+# plotting the modelplotr plots:
+plot_input <- plotting_scope(prepared_input = resto_scores_and_ntiles_rf)
+plot_multiplot()
+```
+
+These plots show that we've created a model to predict Michelin star reviews - solely based on the review texts - that is quite good in predicting Michelin restaurants. Often, you have other, structured data as features available aside from the textual data. Obviously, best is to use all valuable information we have! What would happen if we would add some more features to our model?
+
+## Step 5. Predict Michelin Reviews using topic probabilities and other features
+
+Let's add the other features we have available about the reviews now, to see if we can further improve our prediction of Michelin reviews. In our data preparation blog we briefly discussed the other information we have available for each restaurant review and cleaned some of those features. Here, we read those and add them as predictors to predict Michelin reviews. What do we add?
+
+Three features are average restaurant-level scores for the restaurant over all historic reviews for Value for Price, Noise level and Waiting time;
+Reviewer Fame is a classification of the reviewer into 4 experience levels (lowest level: Proever, 2nd: Fijnproever, 3rd: Expertproever, highest: Meesterproever);
+The reviewer also evaluates and scores the Ambiance and the Service of the restaurant during the review;
+In data preparation, we calculate the total length of the review in number of characters.
+Based on pretrained international sentiment lexicons created by Data Science Lab we've calculated a standardized sentiment score per review. More details in our data preparation blog.
+We explicitly excluded the overall score and score for the food as extra features, since we expect to be able to cover that with our NLP endeavours.
+
+```{r}
+# read data
+
+# **features.csv**: a csv file with other features regarding the reviews (included key: restoreviewid)
+features <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/features.csv',header=TRUE,stringsAsFactors=FALSE) %>% select(restoReviewId,valueForPriceScore,noiseLevelScore,waitingTimeScore,reviewerFame,reviewScoreService,reviewScoreAmbiance,reviewTextLength,sentiment_standardized) %>%
+  mutate(reviewerFame=as.factor(reviewerFame))
+
+str(features)
+```
+
+Now, let's train a model to predict Michelin reviews using both the topic model scores and the other review characteristics as features. This is a nice example of how you can use both NLP outcomes and more conventional numeric and categorical features in one model. First, we add the features to the model input data and redo the train/test split. Then, we specify the new formula and train our extended rf.topicscores.otherfeat model. When it's optimized, we can see to what extent the other features help in predicting Michelin reviews, by looking at feature importance and the predictive power of the model.
+
+```{r}
+# add features and prepare data voor training and testing
+
+modelinput <- reviews_topicprobs %>% 
+  # add label and train set indicator
+  inner_join(labels,by="restoReviewId") %>% inner_join(trainids,by="restoReviewId")  %>%
+  # set label to factor
+  mutate(ind_michelin=as.factor(ind_michelin)) %>%
+  # add extra features
+  inner_join(features,by="restoReviewId") 
+  
+train <- modelinput %>% filter(train==1)
+test <- modelinput %>% filter(train!=1)
+
+#prepare model formula
+feat_topics <- c('prob_topic1','prob_topic2','prob_topic3','prob_topic4','prob_topic5','prob_topic6','prob_topic7')
+feat_other <- c('valueForPriceScore','noiseLevelScore','waitingTimeScore','reviewerFame','reviewScoreService','reviewScoreAmbiance','reviewTextLength','sentiment_standardized')   
+formula <- as.formula(paste('ind_michelin', paste(c(feat_topics,feat_other), collapse=" + "), sep=" ~ "))
+
+# estimate model (after some parameter tuning)
+rf.topicscores.otherfeat <- randomForest(formula, data=train,ntree=500,mtry=4,min_n=50)
+```
+
+Interestingly, the feature importance shows that the topic probabilities are much more important features when predicting Michelin reviews compared to the added features. Our hard work in discovering and labeling the topics seems to pay off! Also interesting to see is that the total review length helps in predicting Michelin reviews and that the sentiment score also is of value here. The overall restaurant scores (value for price, noise level and waiting time) as well as the review specific scores on Service and Ambiance only contribute marginally in predicting Michelin reviews.
+
+```{r}
+# get importance and add label
+
+importance(rf.topicscores.otherfeat) %>% data.frame() %>% mutate(feature=row.names(.)) %>% rename(importance=MeanDecreaseGini) %>%
+  select(feature,importance) %>% arrange(-importance)
+```
+
+Did we improve our model? Let's have a look at the same statistics and plots as before, first on the review level and next on the restaurant level.
+
+```{r}
+# Qing Lin; Show code segment that does not work.
+```
+
+From the confusion matrix and related statistics, we see a small increase in performance. The recall and F1 score slightly go up. Also, from the modelplotr plots we see that we need to select less reviews to have a higher portion of actual Michelin reviews (cumulative gains) and that we are more than 20 times better (2000%) than random guessing in the top 1% according to our model (cumulative lift).
+
+```{r}
+# Qing Lin; Show code segment that does not work.
+```
+
+And what is the impact if we want to point out Michelin restaurants based on our review predictions? Did adding extra features improve that as well?
+
+```{r}
+# prepare data
+resto_scores_and_ntiles_rf2 <- test %>%  
+   # the restaurant id is the first part of the restoReviewId, before the underscore
+   mutate(model_label= as.factor('random forest (topics+other features)'),
+           dataset_label = as.factor('test data'),
+           prob_0 = predict(newdata=.,object=rf.topicscores.otherfeat,type='prob')[,1],
+           prob_1 = predict(newdata=.,object=rf.topicscores.otherfeat,type='prob')[,2],
+           y_true=as.factor(ind_michelin),
+           restoId = str_extract(restoReviewId, "[^_]+")
+          ) %>% 
+   group_by(model_label,
+            dataset_label,
+            y_true,
+            restoId) %>%
+   summarise(prob_0=mean(prob_0),
+             prob_1=mean(prob_1)) %>% 
+    ungroup() %>%
+    arrange(-prob_0) %>%
+    mutate(ntl_0 = ntile(n=100),
+           ntl_1 = 101-ntl_0)
+
+# get predicted and actual values for test data
+predicted <- case_when(resto_scores_and_ntiles_rf2$prob_1>=0.5~1,TRUE~0)
+actual    <- resto_scores_and_ntiles_rf2$y_true
+
+# confusion matrix: actual vs predicted counts
+confmat   <- table(actual,predicted)
+print(confmat)
+
+# derive True Positive, False Positive, False Negative and True Negative from confusion matrix
+TP <- confmat[2,2]; FP <- confmat[1,2]; FN <- confmat[2,1]; TN <- confmat[1,1]
+
+#Accuracy: What % of all predictions are correct?
+Accuracy = (TP+TN)/(TP+FP+FN+TN)
+cat('\n Accuracy:   ', scales::percent(Accuracy),' of all Michelin/non-Michelin restaurant predictions are correct')
+
+#Precision: What % of predicted Michelin reviews are actually Michelin reviews? 
+Precision = (TP)/(TP+FP)
+cat('\n Precision:  ', scales::percent(Precision),' of predicted Michelin restaurants are actually Michelin restaurants')
+
+#Recall: What % of all actual Michelin reviews are predicted as such? 
+Recall = (TP)/(TP+FN)
+cat('\n Recall:     ', scales::percent(Recall),' of all actual Michelin reviews are predicted as such')
+
+#F1.Score = weighted average of Precision and Recall
+F1.Score = 2*(Recall * Precision) / (Recall + Precision)
+cat('\n F1 score:  ', round(F1.Score,2),' is the weighted average of Precision and Recall')
+```
+
+```{r}
+# plotting the modelplotr plots:
+plot_input <- plotting_scope(prepared_input = rbind(resto_scores_and_ntiles_rf,resto_scores_and_ntiles_rf2),scope = 'compare_models')
+plot_multiplot()
+```
+
+Our predictions on the restaurant level improved marginally, as we can see from the statistics and plots above. The statistics, based on a 50% cutoff value, do not show any increase compared to the model based on topic scores only. If we look at the plots, we do see that the model ranks the restaurants slightly better when taking the other characteristics into account.
+
+You might wonder: Based on the insights from the statistics and plots, do we need to change the cutoff of 50%? If this is relevant, depends on your use case. Often, the resulting rankings of scored cases - highest rank for highest model probability - is of most value to use, for instance in a campaign selection. The percentiles in the modelplotr plots are based on that ranking. You could also search for an optimal cutoff value, balancing precision and recall, to get more informative confrontation matrix and statistics, but we won't do that here since it's not our main interest here.
+
+## Predicting Michelin with Topic Model results - wrapping it up
+In this notebook, we took the topic model results from our earlier blog on Topic Modeling and used them as features in a downstream task: predicting Michelin reviews. Although predicting Michelin reviews might not seem to have a real business value, it can easily be translated into something that does represent such value: Predicting customer behaviour such as a purchase, a contract cancellation or a complaint.
+
+Futhermore, we combined the textual features with other features, such as numeric scores and categorical features. It's also easy to imagine how this translates to other contexts, where you often have other information available on top of the textual data. Combining those sources is most likely to result in best predictions, as we also see here.
+
+## Looking forward
+In this and the earlier blog, we've used topic modeling to translate unstructured text into something structured we can use in downstream tasks. In recent years, many other NLP techniques have gained popularity, all with their own benefits and specifics. In out other blogs, we will use some of these techniques, such as word embeddings (Word2Vec, Glove) and BERT to see how those can be applied. And to evaluate: Will this further improve our prediction of Michelin stars?
+
+
+
+
+
+
+
+
+
+
+
+
+

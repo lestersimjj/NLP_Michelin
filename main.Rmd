@@ -26,7 +26,7 @@ knitr::opts_chunk$set(
   comment="#",
   message=FALSE,
   warning=FALSE,
-  cache=FALSE,
+  cache=TRUE,
   fig.align = "center"
 )
 
@@ -34,5 +34,38 @@ path_root="."
 # path_figs=file.path(path_root, "figures")
 # path_libs=file.path(path_root, "libs")
 # if (FALSE){source(file.path(path_libs, "run.R"))}
+```
+
+# Article 1: Comparing strengths and weaknesses of NLP techniques
+## Setting up our context
+```{r}
+# Loading packages 
+library(tidyverse)
+library(tidytext)
+
+#set size of plot
+options(repr.plot.height = 400, repr.plot.width = 1000, repr.plot.res = 100)
+```
+
+## Step 1: Exploring and preparing our review data
+```{r}
+# get rawdata
+rawdata <- read.csv(file = 'data/RestoReviewRawdata.csv', header=TRUE, stringsAsFactors = FALSE, row.names = NULL)
+
+str(rawdata)
+```
+
+```{r}
+# look at some example texts
+rawdata %>% select(reviewText) %>% sample_n(5,seed=1234) %>% pull()
+```
+
+```{r}
+rawdata %>% 
+    group_by(reviewText) %>% 
+    summarize(n_reviews=n()) %>% 
+    mutate(pct=n_reviews/sum(n_reviews)) %>%
+    arrange(-n_reviews) %>% 
+    top_n(10,n_reviews) 
 ```
 
