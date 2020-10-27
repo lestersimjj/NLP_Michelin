@@ -26,11 +26,8 @@ knitr::opts_chunk$set(
   comment="#",
   message=FALSE,
   warning=FALSE,
-<<<<<<< HEAD
   cache=TRUE,
-=======
   cache=FALSE,
->>>>>>> 4aad6eb961dc8e41b2b7d445c9beb0d52ccfc6bc
   fig.align = "center"
 )
 
@@ -40,7 +37,7 @@ path_root="."
 # if (FALSE){source(file.path(path_libs, "run.R"))}
 ```
 
-<<<<<<< HEAD
+
 # Article 1: Comparing strengths and weaknesses of NLP techniques
 ## Setting up our context
 ```{r}
@@ -74,5 +71,4 @@ rawdata %>%
     top_n(10,n_reviews) 
 ```
 
-=======
->>>>>>> 4aad6eb961dc8e41b2b7d445c9beb0d52ccfc6bc
+

@@ -38,9 +38,7 @@ vignettes/*.pdf
 # R Environment Variables
 .Renviron
 .Rproj.user
-<<<<<<< HEAD
 
 # Data files (too big to upload to Github)
 data/
-=======
->>>>>>> 4aad6eb961dc8e41b2b7d445c9beb0d52ccfc6bc
+
