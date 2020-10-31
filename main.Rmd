@@ -22,12 +22,11 @@ graphics.off()
 
 # knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 knitr::opts_chunk$set(
-  collapse=FALSE,
+  collapse=TRUE,
   comment="#",
   message=FALSE,
   warning=FALSE,
   cache=TRUE,
-  cache=FALSE,
   fig.align = "center"
 )
 
@@ -37,8 +36,27 @@ path_root="."
 # if (FALSE){source(file.path(path_libs, "run.R"))}
 ```
 
+# About Project
+In this project, we are interested to predict which restuarants will have a Michelin-star by using online reviews (unstructured data) and other structured data.
 
-# Article 1: Comparing strengths and weaknesses of NLP techniques
+We will be covering the following content:
+
+1. Data Pre-Processing, Tokenization
+2. Topic Modelling (LDA)
+3. Word Embedding (Word2Vec, GLoVe)
+4. Predictive Modelling (randomForest)
+
+Project Reference:
+https://www.theanalyticslab.nl/nlpblogs_0_preparing_restaurant_review_data_for_nlp_and_predictive_modeling/
+https://www.theanalyticslab.nl/nlpblogs_1_identifying_topics_using_topic_-modeling_lda/
+https://www.theanalyticslab.nl/nlpblogs_2_training_word_embedding_models_and_visualize_results/
+https://www.theanalyticslab.nl/nlpblogs_3_use_topic_modeling_results_in_predictive_modeling/
+
+
+
+# Article 1
+Comparing strengths and weaknesses of NLP techniques
+
 ## Setting up our context
 ```{r}
 # Loading packages 
@@ -50,6 +68,7 @@ options(repr.plot.height = 400, repr.plot.width = 1000, repr.plot.res = 100)
 ```
 
 ## Step 1: Exploring and preparing our review data
+Data is downloadable from here: https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/RestoReviewRawdata.csv
 ```{r}
 # get rawdata
 rawdata <- read.csv(file = 'data/RestoReviewRawdata.csv', header=TRUE, stringsAsFactors = FALSE, row.names = NULL)
@@ -57,18 +76,287 @@ rawdata <- read.csv(file = 'data/RestoReviewRawdata.csv', header=TRUE, stringsAs
 str(rawdata)
 ```
 
+Look at some example texts
 ```{r}
-# look at some example texts
 rawdata %>% select(reviewText) %>% sample_n(5,seed=1234) %>% pull()
 ```
 
+Issues to resolve:
+* Encoding issues eg. "b'...". Use regex to remove them.
+
+Analysing duplicate reviews
 ```{r}
 rawdata %>% 
     group_by(reviewText) %>% 
     summarize(n_reviews=n()) %>% 
     mutate(pct=n_reviews/sum(n_reviews)) %>%
     arrange(-n_reviews) %>% 
-    top_n(10,n_reviews) 
+    top_n(10,n_reviews)
 ```
+
+Data Cleaning:
+* Empty review text
+* Removing "b'- Recensie is momenteel in behandeling -'" (In English: The review is currently being processed)
+* Remove punctuations as similar reviews differ only in punctuations
+* Set minimum length of reviews as short reviews are not helpful for us to learn from the text
+
+```{r}
+data <- rawdata %>% 
+  # remove metatext ('b:'), replace linebreaks and some punctuation with space and remove other punctuation and set to lower case.
+  mutate(reviewTextClean = gsub('[[:punct:]]+', '',
+                              gsub('\\\\n|\\.|\\,|\\;',
+                                ' ', tolower(substr(reviewText, 3, nchar(reviewText)-1))))) %>%
+  # create indicator validReview that is 0 for reviews to delete 
+  mutate(validReview = case_when(grepl('recensie is momenteel in behandeling', reviewTextClean) ~ 0, # unpublished review texts 
+                                 nchar(reviewTextClean) < 2 ~ 0, # review texts less than 2 characters in length 
+                                 nchar(reviewTextClean) == 2 & grepl('ok', reviewTextClean) == FALSE ~ 0, # review texts of length 2, not being 'ok'
+                                 nchar(reviewTextClean) == 3 & grepl('top|wow|oke', reviewTextClean) == FALSE ~ 0, # review texts of length 3, not being 'top','wow','oke'
+                                 TRUE ~ 1))
+```
+
+
+Check most frequent reviews after cleaning
+```{r}
+data %>% 
+    group_by(reviewTextClean, validReview) %>% 
+    summarize(n_reviews = n()) %>% 
+    group_by(validReview) %>% 
+    arrange(validReview,desc(n_reviews)) %>% 
+    top_n(5,n_reviews) 
+```
+
+Data Cleaning:
+* Drop reviews with 0 on validReview
+* Create an identifier for unique reviews
+* Convert date to date object
+* Recode waitingTimeScore, valueForPrice, noiseLevelScore from char to numerical categories
+* Convert scoreFood, scoreService, scoreDecor, reviewScoreOverall, scoreTotal from char to numeric
+* Get review length
+
+```{r}
+# 89619 dates failed to parse. To fix.
+data <- data %>% 
+  filter(validReview == 1) %>% 
+  mutate(
+      restoReviewId = paste0(restoId, '_', review_id),
+      reviewDate = lubridate::dmy(reviewDate),
+      yearmonth = format(reviewDate, '%Y%m'),
+      waitingTimeScore = recode(waitingTimeScore, "Kort"=1, "Redelijk"=2, "Kan beter"=3, "Hoog tempo"=4, "Lang"=5, .default=0, .missing=0),
+      valueForPriceScore = recode(valueForPriceScore, "Erg gunstig"=1, "Gunstig"=2, "Kan beter"=3, "Precies goed"=4, "Redelijk"=5, .default=0, .missing = 0),
+      noiseLevelScore = recode(noiseLevelScore,"Erg rustig"=1, "Precies goed"=2, "Rumoerig"=3, "Rustig"=4, .default=0, .missing = 0),
+      scoreFood = as.numeric(gsub(",", ".", scoreFood)),
+      scoreService = as.numeric(gsub(",", ".", scoreService)),
+      scoreDecor = as.numeric(gsub(",", ".", scoreDecor)),
+      reviewScoreOverall = as.numeric(gsub(",", ".", reviewScoreOverall)),
+      scoreTotal = as.numeric(gsub(",", ".", scoreTotal)),
+      reviewTextLength = nchar(reviewTextClean)
+  )
+```
+
+Tokenizing into separate words
+```{r}
+reviews_tokens <- data %>% 
+    select(restoReviewId, reviewTextClean) %>%
+    unnest_tokens(word, reviewTextClean)
+
+reviews_tokens %>% 
+  group_by(restoReviewId) %>% summarise(n_tokens = n()) %>% mutate(n_tokens_binned = cut(n_tokens, breaks = c(0,seq(25,250,25),Inf))) %>% 
+  group_by(n_tokens_binned) %>% summarise(n_reviews = n()) %>% 
+  ggplot(aes(x = n_tokens_binned, y = n_reviews)) + geom_bar(stat='identity',fill='blue') + theme_minimal()
+```
+
+Data Cleaning:
+* Only keep reviews > 50 tokens
+
+```{r}
+reviews_tokens <- reviews_tokens %>% group_by(restoReviewId) %>% mutate(n_tokens = n(), review_50tokens_plus = case_when(n_tokens > 50 ~ 1, TRUE ~ 0))
+
+reviews_tokens %>% group_by(review_50tokens_plus) %>% summarize(n_reviews = n_distinct(restoReviewId)) %>% mutate(pct_reviews = n_reviews/sum(n_reviews))
+```
+
+```{r}
+reviews_tokens <- reviews_tokens %>% filter(n_tokens>50)
+```
+
+Stemming & Lemmatization
+After exploration, did not apply.
+
+Stopwords
+```{r}
+stopwords_sw_iso <-stopwords::stopwords(language = 'nl',source='stopwords-iso')
+
+cat(paste0('Number of stop words from package stopwords (source=stopwords-iso): ',length(stopwords_sw_iso),'\n\n'))
+cat(paste0('First 50 stop words: ',paste(stopwords_sw_iso[1:50], collapse=', '),', ...'))
+```
+
+Keeping some stopwords and adding new stopwords based on context
+```{r}
+# keep some stopwords
+excludefromstopwords <- c('gewoon', 'weinig', 'buiten', 'genoeg', 'samen', 'precies', 'vroeg', 'niemand', 'spoedig')
+stopwords_sw_iso <- stopwords_sw_iso[!stopwords_sw_iso %in% excludefromstopwords]
+cat(paste0('Number # of stop words after removing ',length(excludefromstopwords),' stop words: ',length(stopwords_sw_iso),'\n\n'))
+
+#add new stopwords
+extra_stop_words <- c('zeer', 'echt', 'goede', 'keer', 'terug', '2', 'helaas', '3', 'hele', 'allemaal', 'helemaal', '1', 'mee', 'elkaar'
+, 'fijne', '4', 'graag', 'best', 'erbij', 'echte', 'fijn', 'qua', 'kortom', 'nde', '5', 'volgende', 'waardoor','extra', 'zowel', '10', 'soms', 'nhet', 'heen', 'ontzettend', 'zn', 'regelmatig', 't', 'uiteindelijk', '6', 'diverse', 'xc3xa9xc3xa9n', 'absoluut', 'xe2x82xac', 'langs', 'keren', 'meerdere', 'direct', 'ok', 'mogelijk', 'waarbij', 'daarbij', 'a', '8', 'behoorlijk', 'enorm', '7', '20', 'redelijke', 'alsof', 'n', 'nou', 'ver', 'vele', 'oa', 'uiterst', '15', '2e', 'absolute', 'ipv', 'all','ter', 'you', 'wellicht', 'vast','name', 'den', 'the', 'midden', 'min','dezelfde', 'waarvan', 'can', 'ten', 'bijvoorbeeld', 'eat', '9', 'x', 'vaste', '25', 'uiteraard', 'zie', 'pp', '30', 'allerlei', 'enorme', 'nwij', 'okxc3xa9', 'erop', 'nik', 'ronduit', 'eenmaal', 'ivm', '50', 's', 'hierdoor', 'evenals', 'neen', 'nogmaals', 'hoor', '2x', 'allen', 'wijze', 'uitermate', 'flink', '12', 'doordat', 'mn', 'achteraf', 'flinke', 'daarvoor', 'ene', 'waarop', 'daarentegen', 'ervoor', 'momenteel', 'tevens', 'zeg', 'mede' )
+
+# create dataframe with stop words and indicator (useful for filtering later on)
+stop_words <- data.frame(word = unique(c(stopwords_sw_iso, extra_stop_words)),stringsAsFactors = F)
+stop_words <- stop_words %>% mutate(stopword=1)
+
+cat(paste0('Number of stop words after including ',length(extra_stop_words),' extra stop words: ', sum(stop_words$stopword)))
+```
+
+Remove stopwords from tokens
+
+```{r}
+# First, let's check how a random review text looked before removing stopwords...
+examplereview = reviews_tokens %>% ungroup() %>% distinct(restoReviewId) %>% sample_n(size=1,seed=1234)
+data %>% filter(restoReviewId==pull(examplereview))  %>% select(reviewText) %>% pull() %>% paste0('\n\n') %>% cat()
+
+# remove stopwords
+reviews_tokens_ex_sw <- reviews_tokens %>% left_join(y = stop_words, by = "word", match = "all") %>%
+    filter(is.na(stopword))
+
+# ... and recheck how that review text looks after removing stopwords
+reviews_tokens_ex_sw %>% filter(restoReviewId==examplereview) %>% summarize(reviewText_cleaned=paste(word,collapse=' ')) %>% pull() %>% cat()
+```
+
+Check the new lengths of reviews after removing stopwords
+
+```{r}
+reviews_tokens_ex_sw %>% 
+  group_by(restoReviewId) %>% summarise(n_tokens = n()) %>% mutate(n_tokens_binned = cut(n_tokens, breaks = c(0,seq(25,250,25),Inf))) %>% 
+  group_by(n_tokens_binned) %>% summarise(n_reviews = n()) %>% 
+  ggplot(aes(x=n_tokens_binned,y=n_reviews)) + geom_bar(stat='identity',fill='orange') + theme_minimal() 
+```
+
+Bigrams
+Creating bigrams prior to removing stopwords.
+
+Data Cleaning:
+* Removing bigrams that contain stopwords
+```{r}
+# create bigrams with the unnest_tokens function, specifying the ngram lenght (2)
+bigrams <- reviews_tokens %>% 
+  group_by(restoReviewId) %>% summarize(reviewTextClean = paste(word, collapse = ' ')) %>% 
+  unnest_tokens(bigram, token = "ngrams", n = 2, reviewTextClean)
+
+print(paste0('Total number of bigrams: ',dim(bigrams)[1]))
+
+bigrams_separated <- bigrams %>%  separate(bigram, c('word1', 'word2'), sep = " ")
+bigrams_filtered <- bigrams_separated %>% 
+  filter(!word1 %in% stop_words$word & !word2 %in% stop_words$word)
+bigrams_united <- bigrams_filtered %>%
+    unite(bigram, word1, word2, sep = '_')
+
+print(paste0('Total number of bigrams without stopwords: ',dim(bigrams_united)[1]))
+
+# show most frequent bigrams
+top10_bigrams = bigrams_united %>% group_by(bigram) %>% summarize(n=n()) %>% top_n(10,wt=n) %>% select(bigram) %>% pull()
+print(paste0('Most frequent bigrams: ',paste(top10_bigrams,collapse=", ")))
+
+```
+
+Adding feature: Review Sentiment
+```{r}
+#read in sentiment words from Data Science Lab (https://sites.google.com/site/datascienceslab/projects/multilingualsentiment)
+positive_words_nl <- read_csv("https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/positive_words_nl.txt", col_names=c('word'),col_types='c') %>% mutate(pos=1,neg=0) 
+negative_words_nl <- read_csv("https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/negative_words_nl.txt", col_names=c('word'),col_types='c') %>% mutate(pos=0,neg=1) 
+
+#combine positive and negative tokens and print statistics
+sentiment_nl <- rbind(positive_words_nl, negative_words_nl) 
+sentiment_nl %>% summarize(sentiment_words = n_distinct(word), positive_words = sum(pos), negative_words = sum(neg)) %>% print()
+
+# score sentiment for review texts
+review_sentiment <- data %>% select(restoReviewId, reviewTextClean) %>% unnest_tokens(word, reviewTextClean) %>%
+  left_join(sentiment_nl,by='word') %>% 
+  group_by(restoReviewId) %>% summarize(positive=sum(pos,na.rm=T),negative=sum(neg,na.rm=T)) %>% 
+  mutate(sentiment = positive - negative, 
+         sentiment_standardized = case_when(positive + negative==0~0,TRUE~sentiment/(positive + negative)))
+
+# plot histogram of sentiment score
+review_sentiment %>% ggplot(aes(x=sentiment_standardized))+ geom_histogram(fill='navyblue') + theme_minimal() +labs(title='histogram of sentiment score (standardized)')
+
+```
+
+Saving data
+
+reviews.csv
+```{r}
+# original review text
+reviewText <- data %>% select(restoReviewId,reviewText) 
+# add cleaned review text
+reviewTextClean <- reviews_tokens_ex_sw %>% group_by(restoReviewId) %>% summarize(reviewTextClean=paste(word,collapse=' '))
+# add bigrams without stopwords
+reviewBigrams <- bigrams_united %>% group_by(restoReviewId) %>% summarize(bigrams=paste(bigram,collapse=' ')) 
+
+# combine original review text with cleaned review text
+reviews <- reviewText %>% inner_join(reviewTextClean,by='restoReviewId') %>% left_join(reviewBigrams,by='restoReviewId')
+
+#write to file
+write.csv(reviews,'reviews.csv',row.names=FALSE)
+```
+
+labels.csv
+```{r}
+# read file with Michelin restoIds
+michelin <- read.csv(file = 'https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/michelin_RestoIds.csv',header=TRUE,row.names = 'X')
+
+# create dataframe with per restaurant an indicator to specify it is a Michelin restaurant 
+df_michelin <- data.frame(restoId=michelin,ind_michelin=1)
+cat(paste0('Number of Michelin restaurants in dataset: ',nrow(df_michelin)))
+```
+
+```{r}
+# create dataframe with michelin indicator per review (filter reviews with prepared reviewText) 
+labels <- data %>% inner_join(reviews,by='restoReviewId') %>% left_join(df_michelin,by='restoId') %>% select(restoReviewId,ind_michelin) %>% mutate(ind_michelin=replace_na(ind_michelin,0))
+
+#count # of michelin reviews (and % of reviews that is for michelin restaurant)
+cat(paste0('Number of Michelin restaurant reviews: ',sum(labels$ind_michelin),' (',scales::percent(sum(labels$ind_michelin)/nrow(labels),accuracy=0.1),' of reviews)'))
+
+#save csv
+write.csv(labels,'labels.csv',row.names=FALSE)
+```
+
+restoid.csv
+```{r}
+# select ids for restaurant reviews and restaurants from prepared data (filter reviews with prepared reviewText)
+restoid <- data %>% inner_join(reviews,by='restoReviewId') %>% select(restoReviewId,restoId) 
+
+# save to file
+write.csv(restoid,'restoid.csv',row.names=FALSE)
+```
+
+trainids.csv
+```{r}
+# gerenate a sample of 70% of restoReviews, used for training purposes (filter reviews with prepared reviewText)
+set.seed(101) 
+sample <- sample.int(n = nrow(data), size = floor(.7*nrow(data)), replace = F)
+data$train = 0
+data$train[sample] = 1
+trainids = data  %>% inner_join(reviews,by='restoReviewId') %>% select(restoReviewId,train) %>% filter()
+
+# save to file
+write.csv(trainids,'trainids.csv',row.names=FALSE)
+```
+
+features.csv
+```{r}
+# add sentiment score and select key and relevant features
+features <- data %>% 
+  inner_join(review_sentiment,by='restoReviewId') %>% 
+  select(restoReviewId, scoreTotal, avgPrice, numReviews, scoreFood, scoreService, scoreDecor, reviewerFame, reviewScoreOverall, 
+         reviewScoreFood, reviewScoreService,reviewScoreAmbiance, waitingTimeScore, valueForPriceScore, noiseLevelScore,reviewTextLength,sentiment_standardized) 
+
+# save to file
+write.csv(features,'features.csv',row.names=FALSE)
+```
+
+
+
+
+
+
 
 

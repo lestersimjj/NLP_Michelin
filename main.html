@@ -307,10 +307,23 @@ div.tocify {
 </div>
 
 
-<div id="article-1-comparing-strengths-and-weaknesses-of-nlp-techniques" class="section level1">
-<h1><span class="header-section-number">1</span> Article 1: Comparing strengths and weaknesses of NLP techniques</h1>
+<div id="about-project" class="section level1">
+<h1><span class="header-section-number">1</span> About Project</h1>
+<p>In this project, we are interested to predict which restuarants will have a Michelin-star by using online reviews (unstructured data) and other structured data.</p>
+<p>We will be covering the following content:</p>
+<ol style="list-style-type: decimal">
+<li>Data Pre-Processing, Tokenization</li>
+<li>Topic Modelling (LDA)</li>
+<li>Word Embedding (Word2Vec, GLoVe)</li>
+<li>Predictive Modelling (randomForest)</li>
+</ol>
+<p>Project Reference: <a href="https://www.theanalyticslab.nl/nlpblogs_0_preparing_restaurant_review_data_for_nlp_and_predictive_modeling/" class="uri">https://www.theanalyticslab.nl/nlpblogs_0_preparing_restaurant_review_data_for_nlp_and_predictive_modeling/</a> <a href="https://www.theanalyticslab.nl/nlpblogs_1_identifying_topics_using_topic_-modeling_lda/" class="uri">https://www.theanalyticslab.nl/nlpblogs_1_identifying_topics_using_topic_-modeling_lda/</a> <a href="https://www.theanalyticslab.nl/nlpblogs_2_training_word_embedding_models_and_visualize_results/" class="uri">https://www.theanalyticslab.nl/nlpblogs_2_training_word_embedding_models_and_visualize_results/</a> <a href="https://www.theanalyticslab.nl/nlpblogs_3_use_topic_modeling_results_in_predictive_modeling/" class="uri">https://www.theanalyticslab.nl/nlpblogs_3_use_topic_modeling_results_in_predictive_modeling/</a></p>
+</div>
+<div id="article-1" class="section level1">
+<h1><span class="header-section-number">2</span> Article 1</h1>
+<p>Comparing strengths and weaknesses of NLP techniques</p>
 <div id="setting-up-our-context" class="section level2">
-<h2><span class="header-section-number">1.1</span> Setting up our context</h2>
+<h2><span class="header-section-number">2.1</span> Setting up our context</h2>
 <pre class="r"><code># Loading packages 
 library(tidyverse)
 library(tidytext)
@@ -319,7 +332,8 @@ library(tidytext)
 options(repr.plot.height = 400, repr.plot.width = 1000, repr.plot.res = 100)</code></pre>
 </div>
 <div id="step-1-exploring-and-preparing-our-review-data" class="section level2">
-<h2><span class="header-section-number">1.2</span> Step 1: Exploring and preparing our review data</h2>
+<h2><span class="header-section-number">2.2</span> Step 1: Exploring and preparing our review data</h2>
+<p>Data is downloadable from here: <a href="https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/RestoReviewRawdata.csv" class="uri">https://bhciaaablob.blob.core.windows.net/cmotionsnlpblogs/RestoReviewRawdata.csv</a></p>
 <pre class="r"><code># get rawdata
 rawdata &lt;- read.csv(file = 'data/RestoReviewRawdata.csv', header=TRUE, stringsAsFactors = FALSE, row.names = NULL)
 
@@ -349,13 +363,47 @@ str(rawdata)</code></pre>
 #  $ reviewScoreService : int  8 10 6 2 2 8 8 10 10 8 ...
 #  $ reviewScoreAmbiance: int  8 10 8 4 6 8 6 8 10 2 ...
 #  $ reviewText         : chr  &quot;b'Heerlijk eten en leuke sfeer. Veel keuze bij het buffet en toetjes ook heel goed. Werd steeds aangevuld en wa&quot;| __truncated__ &quot;b\&quot;Met z'n vieren dit restaurant bezocht. We hadden de Butter Chicken, de mixed grill en groente besteld.\\nHet&quot;| __truncated__ &quot;b'Snel gegeten tijdens een plotselinge bezoek naar Zoetermeer. eten was niet zo bijzonder. Maar ja, als  je hon&quot;| __truncated__ &quot;b'Wait to be seated! We moesten lang wachten.Ontvangen door spraakloze ober, kwam  met volle mond uit de keuken&quot;| __truncated__ ...</code></pre>
-<pre class="r"><code># look at some example texts
-rawdata %&gt;% select(reviewText) %&gt;% sample_n(5,seed=1234) %&gt;% pull()</code></pre>
-<pre><code># [1] &quot;b'Groothuis is een gezellig caf\\xc3\\xa9, waar een borrelhapje prima kan, maar verwacht niet te veel kwaliteit van de lunch- of dinerkaart. Eenvoudige gerechten als een sat\\xc3\\xa9 of wat spareribs weten ze niks van te bakken. De bijgerechten, een puntzak frites en een heel simpel kommetje sla, slaan nergens op voor de prijs die je ervoor betaald. Het dessert hebben we naar overgeslagen..\\nDe bediening is niet op elkaar ingespeeld en stelt om beurten dezelfde clich\\xc3\\xa9 vragen.\\nIk vind het een leuke kroeg, maar eten doe ik hier niet weer.'&quot;
-# [2] &quot;b'bediening  was goed en vriende\\nlijke en snel en niet te lang wachten  en het eten was goed.\\nEn het was gezellig  dus geen klachten'&quot;                                                                                                                                                                                                                                                                                                                                                                                                                                   
-# [3] &quot;b\&quot;Wat een aanwinst is dit restaurant! Het concept met het bestellen via de tablet (ook de drankjes) spreekt mij erg aan. Ook het interieur van het restaurant is ruim en modern. De sushi's zijn net even anders doordat er meer vulling dan rijst bij gebruikt wordt, maar erg smakelijk. Maar favoriet zijn de tipan kip en de tipan ossehaas, vleesgerechtjes geserveerd op een hete plaat. Dan zijn er ook nog 2 bolletjes ijs inclusief, kortom heerlijk gegeten!\&quot;&quot;                                                                                                   
-# [4] &quot;b'Het eten was perfect. Alleen werd het hoofdgerecht niet warm opgediend. We hebben het 3-gangen menu genomen en dat was goed'&quot;                                                                                                                                                                                                                                                                                                                                                                                                                                              
-# [5] &quot;b\&quot;Heerlijk malse ossenhaas gegeten met gegrilde groente en een gepofte aardappel! Op de menukaart staat genoeg keuze, dus ik kom zeker eens terug. Vriendelijk personeel en leuk dat het eten 'live' wordt klaargemaakt!\&quot;&quot;</code></pre>
+<p>Look at some example texts</p>
+<pre class="r"><code>rawdata %&gt;% select(reviewText) %&gt;% sample_n(5,seed=1234) %&gt;% pull()</code></pre>
+<pre><code># [1] &quot;b'Wat een geweldig restaurant! Heerlijk eten, sfeervol en zeer prettige en vriendelijke bediening. Gegeten ter gelegenheid van mijn 50e verjaardag en gaven er een extra feestelijk tintje aan. Absoluut mijn favoriete restaurant!'&quot;
+# [2] &quot;b'Het is een prima plek voor een gezellig etentje met familie. Je krijgt er goed eten voor een passende prijs en de bediening ervaren wij als prettig. Niet opdringerig maar aanwezig wanneer nodig.'&quot;                               
+# [3] &quot;b'Lekker gegeten. Goede service. Prima prijs'&quot;                                                                                                                                                                                       
+# [4] &quot;b'Het eten smaakte erg goed, de menukaart is daarbij ook gevarieerd. Een pluspunt is dat je het eten tegelijk krijgt. Het personeel is vriendelijk en de sfeer is goed. Zeker een aanrader om hier te gaan eten!'&quot;                   
+# [5] &quot;b'Excellente gastvrijheid!'&quot;</code></pre>
+<p>Issues to resolve: * Encoding issues eg. “b’…”. Use regex to remove them.</p>
+<p>Analysing duplicate reviews</p>
+<pre class="r"><code>rawdata %&gt;% 
+    group_by(reviewText) %&gt;% 
+    summarize(n_reviews=n()) %&gt;% 
+    mutate(pct=n_reviews/sum(n_reviews)) %&gt;%
+    arrange(-n_reviews) %&gt;% 
+    top_n(10,n_reviews)</code></pre>
+<pre><code># # A tibble: 10 x 3
+#    reviewText                                    n_reviews      pct
+#    &lt;chr&gt;                                             &lt;int&gt;    &lt;dbl&gt;
+#  1 &quot;&quot;                                                11189 0.0295  
+#  2 &quot;b'- Recensie is momenteel in behandeling -'&quot;      1451 0.00382 
+#  3 &quot;b'Heerlijk gegeten!'&quot;                              382 0.00101 
+#  4 &quot;b'Heerlijk gegeten'&quot;                               293 0.000772
+#  5 &quot;b'Heerlijk gegeten.'&quot;                              165 0.000435
+#  6 &quot;b'Top'&quot;                                            108 0.000284
+#  7 &quot;b'Lekker gegeten'&quot;                                  85 0.000224
+#  8 &quot;b'Prima'&quot;                                           72 0.000190
+#  9 &quot;b'Top!'&quot;                                            61 0.000161
+# 10 &quot;b'Lekker gegeten!'&quot;                                 60 0.000158</code></pre>
+<p>Issues to resolve: * Empty review text * Removing “b’- Recensie is momenteel in behandeling -’” (In English: The review is currently being processed) * Remove punctuations as similar reviews differ only in punctuations * Set minimum length of reviews as short reviews are not helpful for us to learn from the text</p>
+<p>Data Processing</p>
+<pre class="r"><code>data &lt;- rawdata %&gt;% 
+  #remove metatext ('b:'), replace linebreaks and some punctuation with space and remove other punctuation and set to lower case.
+  mutate(reviewTextClean=gsub('[[:punct:]]+', '',
+                              gsub('\\\\n|\\.|\\,|\\;',
+                                ' ', tolower(substr(reviewText,3,nchar(reviewText)-1))))) %&gt;%
+  # create indicator validReview that is 0 for reviews to delete 
+  mutate(validReview=case_when(grepl('recensie is momenteel in behandeling',reviewTextClean) ~ 0, # unpublished review texts 
+                                 nchar(reviewTextClean) &lt; 2 ~ 0, # review texts less than 2 characters in length 
+                                 nchar(reviewTextClean) == 2 &amp; grepl('ok',reviewTextClean) == FALSE ~ 0, # review texts of length 2, not being 'ok'
+                                 nchar(reviewTextClean) == 3 &amp; grepl('top|wow|oke',reviewTextClean) == FALSE ~ 0, # review texts of length 3, not being 'top','wow','oke'
+                                 TRUE ~ 1))</code></pre>
 </div>
 </div>
 
